@@ -4,6 +4,37 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-09-25
+
+### Fixed
+
+- Suppressed Chrome/Chromium launcher warnings and "opening in existing browser session" messages when automatically opening the local web UI on Linux/macOS.
+- Browser launch now uses a detached, silent platform-specific opener with a portable fallback.
+
+## [1.1.0] - 2026-09-25
+
+### Added
+
+- External JSON translation catalogs in `locales/en.json` and `locales/it.json`.
+- Shared localization source for both frontend interface strings and backend/API messages.
+- `i18n.py` locale loader with English fallback and locale normalization.
+- Runtime validation that English and Italian expose the same translation keys.
+- Local `/api/i18n/<lang>` endpoints used by the frontend to load the selected language.
+- Built-in `/favicon.ico` response so the local server no longer logs a favicon 404.
+
+### Changed
+
+- Removed hardcoded frontend and backend translation dictionaries from the application code.
+- Updated language switching to use the external JSON catalogs without reloading the interface.
+- Updated packaging metadata so locale JSON files and `i18n.py` are included in distributions.
+- Reworked the README language documentation to describe the shared frontend/backend JSON localization system.
+- Simplified README structure by removing redundant application-information and theme sections and consolidating licence/upstream information.
+
+### Fixed
+
+- Eliminated `/favicon.ico` 404 responses from the local web server logs.
+- Missing or mismatched translation keys are now detected at startup instead of failing silently at runtime.
+
 ## [1.0.0] - 2026-09-25
 
 ### Added
@@ -11,6 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - First official release of the `pdf-unredact` fork.
 - Local graphical web interface intended as the foundation for future desktop builds.
 - English and Italian interface localization.
+- Shared JSON localization catalogs for both frontend and backend messages.
+- Automatic locale-key validation to keep English and Italian catalogs synchronized.
 - System, Light, and Dark themes with operating-system color preference detection.
 - Application information dialog with app name, version, and GitHub repository.
 - `clean` export mode.

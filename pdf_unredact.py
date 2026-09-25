@@ -9,7 +9,7 @@ import pdfplumber
 import pymupdf
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 
 
 BBox = Tuple[float, float, float, float]

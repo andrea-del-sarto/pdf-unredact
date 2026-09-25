@@ -1,4 +1,5 @@
 import json
+import locale
 import os
 import shutil
 import tempfile
@@ -7,6 +8,8 @@ import time
 import urllib.parse
 import uuid
 import webbrowser
+import subprocess
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +23,15 @@ from pdf_unredact import (
     make_side_by_side,
     __version__,
 )
+
+from i18n import frontend_catalog, normalize_language, translate
+
+
+def _system_language():
+    try:
+        return normalize_language(locale.getlocale()[0])
+    except Exception:
+        return "en"
 
 
 HOST = "127.0.0.1"
@@ -37,6 +49,7 @@ INDEX_HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>pdf-unredact</title>
+<link rel="icon" href="/favicon.ico">
 <style>
 :root{--bg:#f5f6f8;--surface:#fff;--surface-2:#f0f2f5;--surface-3:#e8ebef;--text:#15171a;--muted:#68707b;--line:#d9dde3;--line-strong:#c4cad2;--accent:#17191c;--accent-text:#fff;--ok:#147a48;--warn:#a56800;--danger:#b42318;--shadow:0 10px 28px rgba(17,24,39,.08);--preview:#dfe3e8;--focus:#4c7df0;color-scheme:light}
 html[data-theme="dark"]{--bg:#0d0f12;--surface:#15181d;--surface-2:#1c2026;--surface-3:#242a32;--text:#f4f6f8;--muted:#9ba5b1;--line:#2c333d;--line-strong:#3b4450;--accent:#f3f5f7;--accent-text:#111317;--ok:#75d69f;--warn:#f2c15c;--danger:#ff8c84;--shadow:0 12px 34px rgba(0,0,0,.28);--preview:#262c34;--focus:#7aa2ff;color-scheme:dark}
@@ -57,45 +70,50 @@ select,.textInput,.pageInput{border:1px solid var(--line);background:var(--surfa
 </head>
 <body>
 <div class="app">
-<header class="topbar"><div class="brand"><div class="logo">PU</div><div class="brandText"><h1>pdf-unredact</h1></div></div><div class="controls"><button id="infoButton" class="iconButton" type="button" aria-label="Info" title="Info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></button><button id="languageButton" class="languageButton" type="button" aria-label="Language: Italiano" title="Language: Italiano">IT</button><button id="themeButton" class="iconButton" type="button" aria-label="Tema: Sistema" title="Tema: Sistema"></button></div></header>
-<section class="card uploadCard" id="uploadCard"><div class="drop" id="drop"><div class="dropIcon">⇧</div><h2 data-i18n="open_pdf">Apri un PDF</h2><p data-i18n="drop_pdf">Trascinalo qui oppure fai clic per selezionarlo</p><input id="file" type="file" accept="application/pdf,.pdf" hidden></div><div id="uploadStatus" class="status"></div><div id="uploadProgress" class="progress hidden"><div></div></div></section>
+<header class="topbar"><div class="brand"><div class="logo">PU</div><div class="brandText"><h1>pdf-unredact</h1></div></div><div class="controls"><button id="infoButton" class="iconButton" type="button" aria-label="" title=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></button><button id="languageButton" class="languageButton" type="button" aria-label="" title="">IT</button><button id="themeButton" class="iconButton" type="button" aria-label="" title=""></button></div></header>
+<section class="card uploadCard" id="uploadCard"><div class="drop" id="drop"><div class="dropIcon">⇧</div><h2 data-i18n="open_pdf"></h2><p data-i18n="drop_pdf"></p><input id="file" type="file" accept="application/pdf,.pdf" hidden></div><div id="uploadStatus" class="status"></div><div id="uploadProgress" class="progress hidden"><div></div></div></section>
 <div id="workspace" class="hidden"><div class="workspace">
 <main class="mainCol">
-<section class="card fileCard"><div class="fileline"><div><div class="filename" id="filename"></div><div class="small" id="filemeta"></div></div><button class="secondary" id="replace" data-i18n="change_pdf">Cambia PDF</button></div></section>
-<section class="metrics"><div class="metric"><b id="detected">0</b><span data-i18n="detected">Redazioni rilevate</span></div><div class="metric ok"><b id="recoverable">0</b><span data-i18n="recoverable_plural">Recuperabili</span></div><div class="metric warn"><b id="applied">0</b><span data-i18n="probably_applied_plural">Probabilmente applicate</span></div><div class="metric"><b id="uncertain">0</b><span data-i18n="uncertain_plural">Incerte</span></div></section>
-<section class="card previewCard"><div class="sectionHead"><div><h2 data-i18n="preview">Anteprima</h2><p data-i18n="preview_desc">Confronto tra pagina originale e risultato pulito.</p></div><div class="pageCtl"><button class="secondary" id="prev" aria-label="Previous page" title="Previous page">←</button><input class="pageInput" id="page" type="number" min="1" value="1"><span class="small" id="pagesLabel">/ 1</span><button class="secondary" id="next" aria-label="Next page" title="Next page">→</button></div></div><div class="viewer"><div class="paneWrap"><p class="paneTitle" data-i18n="original">Originale</p><div class="pane"><img id="originalPreview" alt="Anteprima originale"></div></div><div class="paneWrap"><p class="paneTitle" data-i18n="clean">Pulito</p><div class="pane"><img id="cleanPreview" alt="Anteprima pulita"></div></div></div></section>
-<section class="card findingsCard"><div class="sectionHead"><div><h2 data-i18n="findings">Rilevamenti</h2><p id="findingsSummary"></p></div></div><div class="tableWrap"><table><thead><tr><th data-i18n="page">Pagina</th><th data-i18n="type">Tipo</th><th data-i18n="status">Stato</th><th data-i18n="words">Parole</th><th data-i18n="characters">Caratteri</th></tr></thead><tbody id="findings"></tbody></table></div></section>
+<section class="card fileCard"><div class="fileline"><div><div class="filename" id="filename"></div><div class="small" id="filemeta"></div></div><button class="secondary" id="replace" data-i18n="change_pdf"></button></div></section>
+<section class="metrics"><div class="metric"><b id="detected">0</b><span data-i18n="detected"></span></div><div class="metric ok"><b id="recoverable">0</b><span data-i18n="recoverable_plural"></span></div><div class="metric warn"><b id="applied">0</b><span data-i18n="probably_applied_plural"></span></div><div class="metric"><b id="uncertain">0</b><span data-i18n="uncertain_plural"></span></div></section>
+<section class="card previewCard"><div class="sectionHead"><div><h2 data-i18n="preview"></h2><p data-i18n="preview_desc"></p></div><div class="pageCtl"><button class="secondary" id="prev" aria-label="" title="">←</button><input class="pageInput" id="page" type="number" min="1" value="1"><span class="small" id="pagesLabel">/ 1</span><button class="secondary" id="next" aria-label="" title="">→</button></div></div><div class="viewer"><div class="paneWrap"><p class="paneTitle" data-i18n="original"></p><div class="pane"><img id="originalPreview" alt=""></div></div><div class="paneWrap"><p class="paneTitle" data-i18n="clean"></p><div class="pane"><img id="cleanPreview" alt=""></div></div></div></section>
+<section class="card findingsCard"><div class="sectionHead"><div><h2 data-i18n="findings"></h2><p id="findingsSummary"></p></div></div><div class="tableWrap"><table><thead><tr><th data-i18n="page"></th><th data-i18n="type"></th><th data-i18n="status"></th><th data-i18n="words"></th><th data-i18n="characters"></th></tr></thead><tbody id="findings"></tbody></table></div></section>
 </main>
 <aside class="sideCol">
-<section class="card panel"><h3 data-i18n="output_format">Formato output</h3><label class="option"><input type="radio" name="mode" value="clean" checked><span><strong data-i18n="clean_pdf">PDF pulito</strong><span data-i18n="clean_pdf_desc">Esporta solo il documento ripulito.</span></span></label><label class="option"><input type="radio" name="mode" value="side_by_side"><span><strong>Side-by-side</strong><span data-i18n="side_by_side_desc">Originale a sinistra, pulito a destra.</span></span></label></section>
-<section class="card panel"><h3 data-i18n="annotations">Annotazioni</h3><label class="option"><input type="radio" name="remove" value="redactions" checked><span><strong data-i18n="redactions_only">Solo redazioni</strong><span data-i18n="redactions_only_desc">Preserva le altre annotazioni.</span></span></label><label class="option"><input type="radio" name="remove" value="all-annotations"><span><strong data-i18n="all_annotations">Tutte le annotazioni</strong><span data-i18n="all_annotations_desc">Rimuove anche note, highlight e markup.</span></span></label></section>
-<section class="card panel"><h3 data-i18n="export_heading">Esportazione</h3><div class="field"><label for="outputName" data-i18n="filename">Nome file</label><input class="textInput" id="outputName" type="text" autocomplete="off" spellcheck="false"></div><div class="actions"><button id="export" data-i18n="export_pdf">Esporta PDF</button><a id="download" class="button hidden" href="#" data-i18n="download_pdf">Scarica PDF</a></div><div id="exportStatus" class="small exportStatus"></div><div class="reportActions"><a id="jsonReport" class="button secondary" href="#" download data-i18n="json_report">Report JSON</a><button class="secondary" id="refreshAudit" data-i18n="refresh_analysis">Aggiorna analisi</button></div></section>
+<section class="card panel"><h3 data-i18n="output_format"></h3><label class="option"><input type="radio" name="mode" value="clean" checked><span><strong data-i18n="clean_pdf"></strong><span data-i18n="clean_pdf_desc"></span></span></label><label class="option"><input type="radio" name="mode" value="side_by_side"><span><strong>Side-by-side</strong><span data-i18n="side_by_side_desc"></span></span></label></section>
+<section class="card panel"><h3 data-i18n="annotations"></h3><label class="option"><input type="radio" name="remove" value="redactions" checked><span><strong data-i18n="redactions_only"></strong><span data-i18n="redactions_only_desc"></span></span></label><label class="option"><input type="radio" name="remove" value="all-annotations"><span><strong data-i18n="all_annotations"></strong><span data-i18n="all_annotations_desc"></span></span></label></section>
+<section class="card panel"><h3 data-i18n="export_heading"></h3><div class="field"><label for="outputName" data-i18n="filename"></label><input class="textInput" id="outputName" type="text" autocomplete="off" spellcheck="false"></div><div class="actions"><button id="export" data-i18n="export_pdf"></button><a id="download" class="button hidden" href="#" data-i18n="download_pdf"></a></div><div id="exportStatus" class="small exportStatus"></div><div class="reportActions"><a id="jsonReport" class="button secondary" href="#" download data-i18n="json_report"></a><button class="secondary" id="refreshAudit" data-i18n="refresh_analysis"></button></div></section>
 </aside>
 </div></div>
 </div>
 <div id="infoModal" class="modalBackdrop hidden" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
   <div class="modal">
-    <div class="modalHead"><h2 id="infoTitle" data-i18n="about_title">Informazioni</h2><button id="infoClose" class="iconButton modalClose" type="button" aria-label="Chiudi" title="Chiudi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="modalHead"><h2 id="infoTitle" data-i18n="about_title"></h2><button id="infoClose" class="iconButton modalClose" type="button" aria-label="" title=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <dl class="infoGrid">
-      <dt data-i18n="app_name">Nome app</dt><dd>pdf-unredact</dd>
-      <dt data-i18n="version">Versione</dt><dd>__APP_VERSION__</dd>
-      <dt data-i18n="github_repo">Repository GitHub</dt><dd><a class="repoLink" href="__APP_REPOSITORY__" target="_blank" rel="noopener noreferrer">__APP_REPOSITORY__</a></dd>
+      <dt data-i18n="app_name"></dt><dd>pdf-unredact</dd>
+      <dt data-i18n="version"></dt><dd>__APP_VERSION__</dd>
+      <dt data-i18n="github_repo"></dt><dd><a class="repoLink" href="__APP_REPOSITORY__" target="_blank" rel="noopener noreferrer">__APP_REPOSITORY__</a></dd>
     </dl>
-    <div class="modalFoot" data-i18n="license_note">GNU GPLv3 · fork di leedrake5/unredact</div>
+    <div class="modalFoot" data-i18n="license_note"></div>
   </div>
 </div>
 <script>
 let job=null,pages=1,current=1,currentFilename='',outputNameTouched=false,currentStats=null,currentFileSize=0,lastStatusKey='',lastStatusError=false,lastExportStatusKey='';
 const $=id=>document.getElementById(id),drop=$('drop'),file=$('file');
-const translations={
-  it:{open_pdf:'Apri un PDF',drop_pdf:'Trascinalo qui oppure fai clic per selezionarlo',change_pdf:'Cambia PDF',detected:'Redazioni rilevate',recoverable_plural:'Recuperabili',probably_applied_plural:'Probabilmente applicate',uncertain_plural:'Incerte',preview:'Anteprima',preview_desc:'Confronto tra pagina originale e risultato pulito.',original:'Originale',clean:'Pulito',findings:'Rilevamenti',page:'Pagina',type:'Tipo',status:'Stato',words:'Parole',characters:'Caratteri',output_format:'Formato output',clean_pdf:'PDF pulito',clean_pdf_desc:'Esporta solo il documento ripulito.',side_by_side_desc:'Originale a sinistra, pulito a destra.',annotations:'Annotazioni',redactions_only:'Solo redazioni',redactions_only_desc:'Preserva le altre annotazioni.',all_annotations:'Tutte le annotazioni',all_annotations_desc:'Rimuove anche note, highlight e markup.',export_heading:'Esportazione',filename:'Nome file',export_pdf:'Esporta PDF',download_pdf:'Scarica PDF',json_report:'Report JSON',refresh_analysis:'Aggiorna analisi',theme:'Tema',theme_system:'Sistema',theme_light:'Chiaro',theme_dark:'Scuro',language:'Lingua',italian:'Italiano',english:'English',previous_page:'Pagina precedente',next_page:'Pagina successiva',original_preview:'Anteprima originale',clean_preview:'Anteprima pulita',pages:'pagine',areas_detected:'aree rilevate',recoverable:'Recuperabile',probably_applied:'Prob. applicata',uncertain:'Incerta',select_pdf:'Seleziona un file PDF.',analyzing:'Analisi del PDF in corso…',open_error:'Errore durante l’apertura del PDF',analysis_complete:'Analisi completata.',analysis_error:'Errore durante l’analisi',generating:'Generazione in corso…',export_error:'Errore di esportazione',pdf_ready:'PDF pronto.',download:'Scarica',source_redact:'Redazione PDF',source_highlight:'Highlight nero',source_square:'Riquadro scuro',source_rectangle:'Rettangolo scuro',about_title:'Informazioni',app_name:'Nome app',version:'Versione',github_repo:'Repository GitHub',license_note:'GNU GPLv3 · fork di leedrake5/unredact',close:'Chiudi',info:'Informazioni'},
-  en:{open_pdf:'Open a PDF',drop_pdf:'Drop it here or click to select it',change_pdf:'Change PDF',detected:'Redactions detected',recoverable_plural:'Recoverable',probably_applied_plural:'Probably applied',uncertain_plural:'Uncertain',preview:'Preview',preview_desc:'Compare the original page with the cleaned result.',original:'Original',clean:'Clean',findings:'Findings',page:'Page',type:'Type',status:'Status',words:'Words',characters:'Characters',output_format:'Output format',clean_pdf:'Clean PDF',clean_pdf_desc:'Export only the cleaned document.',side_by_side_desc:'Original on the left, clean version on the right.',annotations:'Annotations',redactions_only:'Redactions only',redactions_only_desc:'Preserve other annotations.',all_annotations:'All annotations',all_annotations_desc:'Also remove notes, highlights, and markup.',export_heading:'Export',filename:'File name',export_pdf:'Export PDF',download_pdf:'Download PDF',json_report:'JSON report',refresh_analysis:'Refresh analysis',theme:'Theme',theme_system:'System',theme_light:'Light',theme_dark:'Dark',language:'Language',italian:'Italiano',english:'English',previous_page:'Previous page',next_page:'Next page',original_preview:'Original preview',clean_preview:'Clean preview',pages:'pages',areas_detected:'areas detected',recoverable:'Recoverable',probably_applied:'Prob. applied',uncertain:'Uncertain',select_pdf:'Select a PDF file.',analyzing:'Analyzing PDF…',open_error:'Error opening PDF',analysis_complete:'Analysis complete.',analysis_error:'Analysis error',generating:'Generating…',export_error:'Export error',pdf_ready:'PDF ready.',download:'Download',source_redact:'PDF redaction',source_highlight:'Black highlight',source_square:'Dark square',source_rectangle:'Dark rectangle',about_title:'About',app_name:'App name',version:'Version',github_repo:'GitHub repository',license_note:'GNU GPLv3 · fork of leedrake5/unredact',close:'Close',info:'About'}
-};
+const translations={};
+async function loadTranslations(lang){
+  if(translations[lang])return translations[lang];
+  const response=await fetch(`/api/i18n/${lang}`,{cache:'no-store'});
+  if(!response.ok)throw new Error(`Unable to load locale: ${lang}`);
+  translations[lang]=await response.json();
+  return translations[lang];
+}
 let language=localStorage.getItem('pdf-unredact-language');
 if(!['it','en'].includes(language))language=(navigator.language||'en').toLowerCase().startsWith('it')?'it':'en';
-function tr(key){return (translations[language]&&translations[language][key])||translations.en[key]||key}
-function applyLanguage(next){
+function tr(key){return (translations[language]&&translations[language][key])||(translations.en&&translations.en[key])||key}
+async function applyLanguage(next){
   language=['it','en'].includes(next)?next:'en';
+  await Promise.all([loadTranslations('en'),loadTranslations(language)]);
   localStorage.setItem('pdf-unredact-language',language);
   document.documentElement.lang=language;
   document.querySelectorAll('[data-i18n]').forEach(el=>{const key=el.dataset.i18n;el.textContent=tr(key)});
@@ -111,7 +129,7 @@ function applyLanguage(next){
   if(lastExportStatusKey)$('exportStatus').textContent=tr(lastExportStatusKey);
   if(!$('download').classList.contains('hidden')&&$('download').download)$('download').textContent=tr('download')+' '+$('download').download;
 }
-$('languageButton').addEventListener('click',()=>applyLanguage(language==='it'?'en':'it'));
+$('languageButton').addEventListener('click',async()=>{await applyLanguage(language==='it'?'en':'it')});
 function openInfo(){$('infoModal').classList.remove('hidden');$('infoClose').focus()}
 function closeInfo(){$('infoModal').classList.add('hidden');$('infoButton').focus()}
 $('infoButton').addEventListener('click',openInfo);
@@ -139,10 +157,13 @@ async function refreshPreview(){if(!job)return;current=Math.max(1,Math.min(pages
 async function refreshAudit(){if(!job)return;const btn=$('refreshAudit');btn.disabled=true;try{const r=await fetch(`/api/audit/${job}`,{method:'POST',headers:apiHeaders()});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('analysis_error'));renderStats(d.stats)}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message}finally{btn.disabled=false}}
 async function exportPdf(){if(!job)return;const btn=$('export');btn.disabled=true;$('download').classList.add('hidden');lastExportStatusKey='generating';$('exportStatus').textContent=tr('generating');try{const r=await fetch('/api/export',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({job_id:job,mode:outputMode(),remove:removeMode(),filename:$('outputName').value.trim()})});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('export_error'));$('download').href=d.download_url;$('download').download=d.filename;$('download').textContent=tr('download')+' '+d.filename;$('download').classList.remove('hidden');lastExportStatusKey='pdf_ready';$('exportStatus').textContent=tr('pdf_ready')}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message}finally{btn.disabled=false}}
 drop.onclick=()=>file.click();file.onchange=()=>upload(file.files[0]);['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>upload(e.dataTransfer.files[0]));$('replace').onclick=()=>file.click();$('prev').onclick=()=>{$('page').value=Math.max(1,current-1);refreshPreview()};$('next').onclick=()=>{$('page').value=Math.min(pages,current+1);refreshPreview()};$('page').onchange=refreshPreview;document.querySelectorAll('input[name="remove"]').forEach(x=>x.onchange=refreshPreview);document.querySelectorAll('input[name="mode"]').forEach(x=>x.onchange=()=>syncOutputName(false));$('outputName').addEventListener('input',()=>{outputNameTouched=true});$('export').onclick=exportPdf;$('refreshAudit').onclick=refreshAudit;
-applyLanguage(language);
+applyLanguage(language).catch(err=>{console.error(err);document.documentElement.lang='en'});
 </script>
 </body></html>'''
 INDEX_HTML = INDEX_HTML.replace('__APP_VERSION__', __version__).replace('__APP_REPOSITORY__', APP_REPOSITORY)
+
+
+FAVICON_SVG = b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#17191c"/><text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="white">PU</text></svg>'''
 
 
 def _cleanup_old_jobs():
@@ -176,43 +197,8 @@ def _safe_filename(name):
     return cleaned or "document.pdf"
 
 
-SERVER_MESSAGES = {
-    "it": {
-        "invalid_page": "Pagina non valida",
-        "invalid_endpoint": "Endpoint non valido",
-        "job_not_found": "Sessione scaduta o non trovata",
-        "report_unavailable": "Report non disponibile",
-        "file_unavailable": "File non disponibile",
-        "not_found": "Non trovato",
-        "empty_file": "File vuoto",
-        "too_large": "PDF troppo grande (limite 500 MB)",
-        "invalid_pdf": "Il file non sembra essere un PDF valido",
-        "password": "PDF protetto da password: non supportato in questa versione",
-        "cannot_analyze": "Impossibile analizzare il PDF",
-        "invalid_mode": "Modalità non valida",
-        "invalid_annotations": "Opzione annotazioni non valida",
-    },
-    "en": {
-        "invalid_page": "Invalid page",
-        "invalid_endpoint": "Invalid endpoint",
-        "job_not_found": "Session expired or not found",
-        "report_unavailable": "Report unavailable",
-        "file_unavailable": "File unavailable",
-        "not_found": "Not found",
-        "empty_file": "Empty file",
-        "too_large": "PDF too large (500 MB limit)",
-        "invalid_pdf": "The file does not appear to be a valid PDF",
-        "password": "Password-protected PDFs are not supported in this version",
-        "cannot_analyze": "Unable to analyze the PDF",
-        "invalid_mode": "Invalid mode",
-        "invalid_annotations": "Invalid annotation option",
-    },
-}
-
-
 def _message(key, lang="en"):
-    lang = "it" if lang == "it" else "en"
-    return SERVER_MESSAGES[lang].get(key, SERVER_MESSAGES["en"].get(key, key))
+    return translate(key, lang, section="backend")
 
 
 def _render_preview(path, page_number, kind, remove_mode, lang="en"):
@@ -247,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
             if query_lang in {"it", "en"}:
                 return query_lang
         accept = (self.headers.get("Accept-Language", "") or "").lower()
-        return "it" if accept.startswith("it") else "en"
+        return normalize_language(accept)
 
     def _send(self, status, body=b"", content_type="text/plain; charset=utf-8", headers=None):
         self.send_response(status)
@@ -270,6 +256,17 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/":
             self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if path == "/favicon.ico":
+            self._send(200, FAVICON_SVG, "image/svg+xml; charset=utf-8")
+            return
+        if path.startswith("/api/i18n/"):
+            lang = normalize_language(path.rsplit("/", 1)[-1])
+            requested = path.rsplit("/", 1)[-1].lower()
+            if requested not in {"it", "en"}:
+                self._json(404, {"error": _message("not_found", self._lang(parsed))})
+                return
+            self._json(200, frontend_catalog(lang))
             return
         if path.startswith("/api/preview/"):
             parts = path.strip("/").split("/")
@@ -417,16 +414,48 @@ def _create_server(preferred_port=8765):
     return server, int(server.server_address[1])
 
 
+def _open_browser_silent(url: str) -> None:
+    """Open the local UI without forwarding browser launcher output to the terminal."""
+    try:
+        if sys.platform.startswith("linux"):
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        if sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    # Portable fallback for uncommon environments.
+    webbrowser.open(url)
+
+
 def run_web(port=8765, open_browser=True):
     server, actual_port = _create_server(port)
     url = f"http://{HOST}:{actual_port}/"
+    console_lang = _system_language()
     print("pdf-unredact")
     if actual_port != port:
-        print(f"Port {port} is already in use; using port {actual_port} instead.")
-    print(f"Open: {url}")
-    print("Press Ctrl+C to stop.")
+        print(translate("port_in_use", console_lang, port=port, actual=actual_port))
+    print(translate("open_url", console_lang, url=url))
+    print(translate("press_stop", console_lang))
     if open_browser:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.6, lambda: _open_browser_silent(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -434,7 +463,7 @@ def run_web(port=8765, open_browser=True):
     finally:
         server.server_close()
         shutil.rmtree(WORK_ROOT, ignore_errors=True)
-        print("Stopped. Temporary files removed.")
+        print(translate("stopped", console_lang))
 
 
 if __name__ == "__main__":

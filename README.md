@@ -1,53 +1,13 @@
 # pdf-unredact
 
-**Version:** `1.0.0`  
-**Status:** first official release of the `pdf-unredact` fork
+**Version:** `1.1.1`  
+**Repository:** https://github.com/andrea-del-sarto/pdf-unredact
 
 `pdf-unredact` is a PDF redaction analysis and recovery tool. It can inspect PDFs where content is still present underneath visual covers and export a cleaned PDF or a side-by-side comparison while preserving the source PDF's native fonts and page content wherever possible.
 
-Project repository:
-
-https://github.com/andrea-del-sarto/pdf-unredact
-
-This project is a substantially modified fork of **leedrake5/unredact**:
-
-https://github.com/leedrake5/unredact
-
-The upstream project and this fork are distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE).
+The project is a substantially modified fork of **leedrake5/unredact** and is distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE).
 
 Release history is documented in [`CHANGELOG.md`](CHANGELOG.md).
-
-## Version 1.0.0
-
-`1.0.0` is the **first official version of this fork** and the baseline release of the `pdf-unredact` project.
-
-It includes:
-
-- the rewritten native-PDF cleaning engine;
-- `clean` and `side_by_side` output modes;
-- selective removal of redaction-like annotations;
-- recoverable / probably applied / uncertain classification;
-- JSON analysis reports;
-- the graphical web interface intended as the basis for the desktop application;
-- English and Italian interface localization;
-- System / Light / Dark themes with operating-system preference detection;
-- the application information dialog with app name, version, and project repository;
-- automatic fallback to a free port when the preferred web port is already occupied;
-- preservation of original PDF font resources and layout wherever the source PDF structure permits it.
-
-The version can be checked from the command line with:
-
-```bash
-python pdf_unredact.py --version
-```
-
-Expected output:
-
-```text
-pdf_unredact.py 1.0.0
-```
-
----
 
 ## Web interface
 
@@ -57,38 +17,44 @@ Start the interface with:
 python pdf_unredact.py --web
 ```
 
-The app prefers `http://127.0.0.1:8765/`. If port `8765` is already occupied, it automatically selects a free local port and prints the actual address to open.
+The app prefers `http://127.0.0.1:8765/`. If that port is already occupied, it automatically selects a free port and prints the address actually in use.
 
-The interface is designed as the basis for the desktop application on Windows, macOS, and Linux, while keeping the same PDF-processing engine and workflow.
-
-
-### Application information
-
-The **ⓘ** button in the top bar opens an information dialog showing the application name, current version, and GitHub repository.
-
-The project repository is:
-
-https://github.com/andrea-del-sarto/pdf-unredact
-
-The URL is centralized in `web_app.py` and can optionally be overridden with the `PDF_UNREDACT_REPOSITORY` environment variable for development or repackaging.
+The interface is designed as the basis for a desktop application on Windows, macOS, and Linux while keeping the same PDF-processing engine and workflow.
 
 ### Languages
 
-The interface is available in **English** and **Italian**.
+The interface and backend messages are available in:
 
-Use the language button in the top-right corner to switch between `IT` and `EN`. On first launch, the interface chooses Italian when the system/browser language starts with `it`; otherwise it defaults to English. The selected language is remembered for future launches.
+- **English** (`en`)
+- **Italian** (`it`)
 
-The language switch updates the interface without reloading the application, including buttons, option descriptions, statistics labels, findings/status labels, preview accessibility text, theme tooltips, progress messages, export messages, and localized API errors. Number formatting also follows the selected language.
+Use the language button in the top-right corner to switch between `IT` and `EN`. On first launch, Italian is selected when the system/browser language starts with `it`; otherwise English is used. The selected language is remembered locally.
 
-### Theme
+Translations are stored outside the Python and JavaScript application code:
 
-The top-right theme button cycles through three states, each represented by a different icon:
+```text
+locales/
+├── en.json
+└── it.json
+```
 
-- **System** — monitor icon; follows the operating system / desktop color preference through the standard `prefers-color-scheme` mechanism;
-- **Light** — sun icon; forces the light theme;
-- **Dark** — moon icon; forces the dark theme.
+Each locale file contains two catalogs:
 
-Each press advances `System → Light → Dark → System`. The button tooltip and accessible label always indicate the current state. `System` reacts to theme changes exposed by Windows, macOS, and Linux desktop/browser environments, while a manually selected Light or Dark preference is remembered locally.
+```json
+{
+  "frontend": {},
+  "backend": {}
+}
+```
+
+- `frontend` contains labels, buttons, tooltips, status messages, statistics labels, findings/status names, preview text, export messages, and other interface strings.
+- `backend` contains API/server errors and backend messages.
+
+The frontend loads its catalog from the local application API (`/api/i18n/en` or `/api/i18n/it`). The backend reads the same JSON files through `i18n.py`, so translations are maintained in one place rather than duplicated in Python and JavaScript.
+
+`i18n.py` also validates that the English and Italian files expose the same translation keys. Missing or extra keys are therefore detected at startup. English is used as the fallback language for unsupported locales or unavailable keys.
+
+Changing language updates the interface without reloading the application, including dynamically generated states and localized API errors.
 
 ### Processing options
 
@@ -104,21 +70,38 @@ The web interface exposes all document-processing options currently available fr
 - page-by-page findings table;
 - manual analysis refresh.
 
-The CLI-only `--port` and `--no-browser` flags control how the temporary web host is started and are therefore not document-processing settings inside the interface.
+The CLI-only `--port` and `--no-browser` flags control how the web host is started and are not document-processing settings.
 
-To use another port while running the browser version:
+Use another port:
 
 ```bash
 python pdf_unredact.py --web --port 9000
 ```
 
-To prevent automatic browser opening:
+Prevent automatic browser opening:
 
 ```bash
 python pdf_unredact.py --web --no-browser
 ```
 
+---
+
 ## CLI
+
+### Command summary
+
+| Command | Purpose |
+|---|---|
+| `python pdf_unredact.py --web` | Start the graphical web interface |
+| `python pdf_unredact.py --web --port 9000` | Start the web interface on a preferred port |
+| `python pdf_unredact.py --web --no-browser` | Start the web interface without opening the browser automatically |
+| `python pdf_unredact.py --version` | Show the installed `pdf-unredact` version |
+| `python pdf_unredact.py document.pdf --mode clean` | Export a cleaned PDF |
+| `python pdf_unredact.py document.pdf --mode side_by_side` | Export an original/cleaned side-by-side comparison |
+| `python pdf_unredact.py document.pdf --mode clean --stats` | Export a cleaned PDF and print redaction statistics |
+| `python pdf_unredact.py document.pdf --mode clean --stats-json audit.json` | Export a cleaned PDF and save the detailed JSON report |
+| `python pdf_unredact.py document.pdf --mode clean --remove all-annotations` | Export a cleaned PDF while removing every annotation |
+| `python pdf_unredact.py document.pdf --mode clean -o output.pdf` | Choose an explicit output filename |
 
 The command-line interface remains available:
 
@@ -127,7 +110,7 @@ python pdf_unredact.py document.pdf --mode clean
 python pdf_unredact.py document.pdf --mode side_by_side
 ```
 
-Analysis information can be printed or saved as JSON:
+Print or save analysis information:
 
 ```bash
 python pdf_unredact.py document.pdf --mode clean --stats
@@ -140,25 +123,31 @@ By default only redaction-like annotations are removed. To deliberately remove a
 python pdf_unredact.py document.pdf --mode clean --remove all-annotations
 ```
 
+---
+
 ## Output behavior
 
 ### Clean PDF
 
-`clean` starts from the source PDF and removes selected annotation-based covers without re-typesetting the visible text. The source PDF's text objects, embedded font resources, sizes, colors, positioning, images, and vector graphics are therefore retained wherever the PDF structure permits it.
+`clean` starts from the source PDF and removes selected annotation-based covers without re-typesetting visible text. Text objects, embedded font resources, sizes, colors, positioning, images, and vector graphics are retained wherever the PDF structure permits it.
 
 ### Side-by-side
 
 The left half reproduces the visible original page, including annotation appearances. The right half contains cleaned native PDF content. Visible text on the right is not rebuilt using fallback fonts.
 
+---
+
 ## Redaction classification
 
-The analysis classifies detected candidates as:
+Detected candidates are classified as:
 
 - **Recoverable** — live PDF text overlaps the detected cover.
 - **Probably applied** — a dark redaction-like rectangle is present but no live text is found underneath. This is heuristic and can include legitimate graphics.
 - **Uncertain** — a redaction-like annotation exists but recoverable content cannot be established confidently.
 
-The tool recognizes dedicated PDF Redact annotations and some improvised covers such as opaque black Highlight or Square annotations. It can also inspect dark rectangles in the page drawing stream for audit purposes.
+The tool recognizes dedicated PDF Redact annotations and some improvised covers such as opaque black Highlight or Square annotations. It can also inspect dark rectangles in the page drawing stream for analysis purposes.
+
+---
 
 ## Important limitations
 
@@ -167,6 +156,8 @@ A properly applied PDF redaction normally removes the underlying content. If the
 The project does not perform OCR, does not bypass encryption or passwords, and should not be treated as proof that every dark graphical region is a redaction.
 
 Editing or re-saving a PDF can affect digital signatures, certification state, incremental revisions, or evidentiary provenance. Always retain the original document unchanged.
+
+---
 
 ## Installation
 
@@ -185,18 +176,20 @@ uv run python pdf_unredact.py --web
 
 Or install the dependencies with your preferred Python environment and run `pdf_unredact.py` directly.
 
-## Fork / upstream
+---
 
-Upstream project: **leedrake5/unredact**  
-Upstream repository: https://github.com/leedrake5/unredact  
-License: **GNU GPLv3**
+## Licence
 
-Version `1.0.0` is the first official commit/release of this fork. It establishes the new `pdf-unredact` codebase while retaining attribution to the GPLv3-licensed upstream project.
+`pdf-unredact` is licensed under the **GNU General Public License v3.0**. The full licence text is included in [`LICENSE`](LICENSE).
 
-Major changes in this fork include native PDF-content preservation, `clean` export, selective redaction removal, expanded redaction analysis/classification, JSON reporting, a rewritten side-by-side mode, use of the `pymupdf` import name, and the redesigned bilingual interface with English/Italian localization and system/light/dark themes.
+This project is a substantially modified fork of **leedrake5/unredact**:
+
+https://github.com/leedrake5/unredact
+
+The current project repository is:
+
+https://github.com/andrea-del-sarto/pdf-unredact
+
+The fork preserves attribution to the GPLv3-licensed upstream project while introducing native PDF-content preservation, `clean` export, selective redaction removal, expanded redaction analysis/classification, JSON reporting, a rewritten side-by-side mode, the `pymupdf` import name, and the redesigned bilingual interface.
 
 Parts of this fork were developed with AI-assisted coding tools ("vibe coding") as part of the implementation workflow. Changes were reviewed, tested, and adapted before inclusion.
-
-## License
-
-This project is licensed under the **GNU General Public License v3.0**. The full license text is included in [`LICENSE`](LICENSE).
