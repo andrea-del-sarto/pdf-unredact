@@ -1,10 +1,20 @@
 [project]
-name = "unredact"
-version = "0.1.0"
-description = "PDF Redaction Text Recovery & Display Tool"
+name = "pdf-unredact"
+version = "1.0.0"
+description = "Local PDF redaction auditing and recovery tool with native font and layout preservation"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
-    "pdfplumber>=0.11.8",
-    "pymupdf>=1.26.7",
+    "pdfplumber>=0.11.0",
+    "pymupdf>=1.26.0",
 ]
+
+[project.scripts]
+pdf-unredact = "pdf_unredact:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["pdf_unredact.py", "web_app.py"]
