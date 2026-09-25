@@ -4,6 +4,17 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-09-25
+
+### Changed
+
+- The web interface now starts the PDF download immediately after **Export PDF** finishes generating the document.
+- Removed the redundant second download button from the export panel.
+
+### Fixed
+
+- Export no longer requires a second user action to download the generated PDF.
+
 ## [1.1.1] - 2026-09-25
 
 ### Fixed

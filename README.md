@@ -1,6 +1,6 @@
 # pdf-unredact
 
-**Version:** `1.1.1`  
+**Version:** `1.1.2`  
 **Repository:** https://github.com/andrea-del-sarto/pdf-unredact
 
 `pdf-unredact` is a PDF redaction analysis and recovery tool. It can inspect PDFs where content is still present underneath visual covers and export a cleaned PDF or a side-by-side comparison while preserving the source PDF's native fonts and page content wherever possible.
@@ -64,6 +64,7 @@ The web interface exposes all document-processing options currently available fr
 - `clean` or `side_by_side` output;
 - remove only detected redaction-like annotations or remove all annotations;
 - choose the output filename (web equivalent of `-o/--output`);
+- pressing **Export PDF** generates the file and starts the download immediately;
 - automatic redaction analysis and statistics (`--stats` equivalent);
 - downloadable detailed JSON report (`--stats-json` equivalent);
 - original vs cleaned page preview;
