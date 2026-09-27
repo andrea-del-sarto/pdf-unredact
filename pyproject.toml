@@ -1,6 +1,6 @@
 [project]
 name = "pdf-unredact"
-version = "1.2.0"
+version = "1.2.1"
 description = "Local PDF redaction auditing and recovery tool with native font and layout preservation"
 readme = "README.md"
 requires-python = ">=3.10"

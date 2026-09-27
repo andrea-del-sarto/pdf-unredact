@@ -4,6 +4,20 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-09-27
+
+### Changed
+
+- Export diagnostics now distinguish recoverable-but-unsupported rectangles from content-stream rewrite failures.
+- `CleanResult` now reports `rewrite_attempts`, `rewrite_successes`, and `rewrite_failures` separately from `unsupported_recoverable_rectangles`.
+- Clean and side-by-side exports now validate that the saved PDF can be reopened and that the expected page count is preserved.
+
+### Fixed
+
+- Fixed export accounting where a candidate that was marked `content_stream_rewrite` during audit but failed to match again during export was incorrectly counted as `unsupported`.
+- Removed a duplicate internal recoverability assignment in text-under-cover analysis.
+- Hardened export failure reporting so rewrite mismatches are visible as execution failures instead of being conflated with unsupported PDF structures.
+
 ## [1.2.0] - 2026-09-25
 
 ### Added

@@ -8,7 +8,7 @@ from typing import List, Tuple
 import pymupdf
 
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 
 BBox = Tuple[float, float, float, float]
@@ -247,6 +247,9 @@ class CleanResult:
     annotations_removed: int = 0
     content_stream_rectangles_removed: int = 0
     unsupported_recoverable_rectangles: int = 0
+    rewrite_attempts: int = 0
+    rewrite_successes: int = 0
+    rewrite_failures: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -703,8 +706,13 @@ def _mark_removability(pdf_path: str, findings: List[RedactionCandidate]) -> Non
         doc.close()
 
 
-def _rewrite_dark_rectangles(doc, findings: List[RedactionCandidate], page_numbers=None) -> tuple[int, int]:
-    """Remove safely isolated recoverable dark rectangles from page content streams."""
+def _rewrite_dark_rectangles(doc, findings: List[RedactionCandidate], page_numbers=None) -> tuple[int, int, int]:
+    """Remove safely isolated recoverable dark rectangles from page content streams.
+
+    Returns ``(removed, attempts, failures)``. A failure means a candidate was
+    classified as rewrite-capable during audit, but could not be matched again
+    at export time. This is intentionally distinct from an unsupported candidate.
+    """
     allowed_pages = set(page_numbers) if page_numbers is not None else None
     by_page = {}
     for candidate in findings:
@@ -717,16 +725,18 @@ def _rewrite_dark_rectangles(doc, findings: List[RedactionCandidate], page_numbe
             by_page.setdefault(candidate.page, []).append(candidate)
 
     removed = 0
-    skipped = 0
+    attempts = 0
+    failures = 0
     for page_no, candidates in by_page.items():
         page = doc[page_no - 1]
         modifications = {}
         matched_candidates = set()
 
         for candidate_index, candidate in enumerate(candidates):
+            attempts += 1
             matches = _rewrite_ranges_for_box(doc, page, candidate.box)
             if not matches:
-                skipped += 1
+                failures += 1
                 continue
             matched_candidates.add(candidate_index)
             for xref, ranges in matches:
@@ -749,7 +759,7 @@ def _rewrite_dark_rectangles(doc, findings: List[RedactionCandidate], page_numbe
         page.set_contents(new_xref)
         removed += len(matched_candidates)
 
-    return removed, skipped
+    return removed, attempts, failures
 
 
 def _candidate_from_dict(data: dict) -> RedactionCandidate:
@@ -769,17 +779,21 @@ def _candidate_from_dict(data: dict) -> RedactionCandidate:
 def _clean_document(doc, findings: List[RedactionCandidate], remove: str = "redactions", page_numbers=None) -> CleanResult:
     result = CleanResult()
     result.annotations_removed = _remove_annotations(doc, mode=remove, page_numbers=page_numbers)
-    result.content_stream_rectangles_removed, skipped = _rewrite_dark_rectangles(
-        doc, findings, page_numbers=page_numbers
-    )
+    (
+        result.content_stream_rectangles_removed,
+        result.rewrite_attempts,
+        result.rewrite_failures,
+    ) = _rewrite_dark_rectangles(doc, findings, page_numbers=page_numbers)
+    result.rewrite_successes = result.content_stream_rectangles_removed
+    allowed_pages = set(page_numbers) if page_numbers is not None else None
     result.unsupported_recoverable_rectangles = sum(
         1
         for candidate in findings
         if candidate.source == "dark_rectangle"
         and candidate.recoverable
         and not candidate.removable
-        and (page_numbers is None or candidate.page in set(page_numbers))
-    ) + skipped
+        and (allowed_pages is None or candidate.page in allowed_pages)
+    )
     return result
 
 
@@ -902,12 +916,28 @@ def _remove_annotations(doc, mode: str = "redactions", page_numbers=None) -> int
     return removed
 
 
+def _validate_saved_pdf(path: str, expected_pages: int | None = None) -> None:
+    """Fail fast if an exported PDF cannot be reopened or lost pages."""
+    check = pymupdf.open(path)
+    try:
+        if check.page_count <= 0:
+            raise ValueError("exported PDF contains no pages")
+        if expected_pages is not None and check.page_count != expected_pages:
+            raise ValueError(
+                f"exported PDF page count changed: expected {expected_pages}, got {check.page_count}"
+            )
+    finally:
+        check.close()
+
+
 def make_clean_pdf(input_pdf: str, output_pdf: str, remove: str = "redactions") -> CleanResult:
     stats = compute_redaction_stats(input_pdf)
     doc = pymupdf.open(input_pdf)
     try:
         result = _clean_document(doc, stats.findings, remove=remove)
+        expected_pages = doc.page_count
         doc.save(output_pdf, garbage=4, deflate=True)
+        _validate_saved_pdf(output_pdf, expected_pages=expected_pages)
         return result
     finally:
         doc.close()
@@ -941,7 +971,9 @@ def make_side_by_side(input_pdf: str, output_pdf: str, remove: str = "redactions
                 keep_proportion=False,
                 overlay=True,
             )
+        expected_pages = out.page_count
         out.save(output_pdf, garbage=4, deflate=True)
+        _validate_saved_pdf(output_pdf, expected_pages=expected_pages)
         return result
     finally:
         out.close()
