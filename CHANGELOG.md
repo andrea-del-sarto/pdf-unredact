@@ -4,6 +4,43 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-09-25
+
+### Added
+
+- Separate `removable` and `removal_method` fields for each redaction candidate so recoverability no longer implies that the exporter can remove the cover.
+- `annotation_delete`, `content_stream_rewrite`, and `unsupported` removal methods in JSON reports and the web findings table.
+- Conservative content-stream rewriting for isolated recoverable dark filled rectangles, allowing vector black bars embedded directly in page content to be removed without deleting the live text underneath.
+- Removability metrics in the web interface, including recoverable-but-unsupported candidates.
+- Export results now track annotation removals, content-stream rectangle removals, and unsupported recoverable rectangles internally.
+
+### Changed
+
+- Clean preview uses the same cleaning pipeline as final export, including supported content-stream rectangle removal.
+- `side_by_side` right-hand output now applies supported content-stream rewrites as well as annotation removal.
+- Replaced the misleading `recovery_rate` statistic with `hidden_text_percentage`, defined as the percentage of all extracted text characters that are located underneath detected covers.
+- Redaction analysis documentation now distinguishes content recoverability from cover removability.
+- Text-under-cover analysis now uses PyMuPDF directly; the redundant `pdfplumber` runtime dependency has been removed.
+- Non-recoverable cases remain intentionally untouched: permanently applied redactions with deleted text, legitimate black graphics, and raster images with baked-in covers are not destructively rewritten.
+
+### Fixed
+
+- Fixed inherited transformation handling in content-stream rewriting: page-wide or outer `cm` matrices are now tracked across sequential `/Contents` streams and propagated through nested `q` / `Q` graphics-state blocks before rectangle geometry is matched.
+- Fixed false-positive `dark_rectangle` detections caused by compound dark drawings such as table/grid borders: automatic cover detection now requires a single normalized rectangle drawing instead of treating the bounding box of multiple filled rectangles as one redaction.
+- On the 72-page regression PDF, the previous 143 `recoverable` / `unsupported` findings are no longer reported as redactions because they are compound table/grid graphics; the 195 actual annotation-based covers remain recoverable and removable.
+- Added safe handling for isolated rectangle covers drawn after PDF `cm` transformations; translation, scaling, rotation, and normal matrix concatenation are resolved before geometry matching.
+- Added conservative support for simple `ExtGState` (`gs`) cover blocks when the referenced graphics state is near-opaque, uses normal blending, and has no unsupported soft mask or graphics-state features.
+- Added support for rectangular paths constructed with `m` / `l` / `h` instead of the `re` operator, while continuing to reject curves and non-rectangular paths.
+- Fixed `B` / `B*` cover blocks that also set simple stroke width or stroke graphics state before painting the rectangle.
+- Added support for harmless `n` path resets emitted by common PDF generators before the actual cover path.
+- Expanded the 1.2.0 content-stream regression coverage so the transform-matrix, fill-and-stroke, ExtGState, and explicit-path fixtures are now all classified as recoverable and removable when their blocks satisfy the conservative safety rules.
+- Fixed recoverable content-stream rectangles generated with the PDF `B` / `B*` / `b` / `b*` fill-and-stroke operators; the stream rewriter now safely handles their stroke-color operators as part of the same isolated rectangle block.
+- Fixed near-black vector covers such as RGB `0.12 0.12 0.12`, which were previously missed by the hard `< 0.10` darkness threshold. The conservative darkness threshold is now `<= 0.15`.
+- Fixed a case where a recoverable `dark_rectangle` was detected in the audit but remained visible in `clean` and in the cleaned side of `side_by_side`.
+- Fixed rotated-page analysis by using PyMuPDF word geometry in the same coordinate system as annotations and drawings.
+- Fixed false-positive semantics for large dark graphics with no live text underneath: they are now left `uncertain` instead of automatically being labelled as probably applied redactions.
+- Fixed the clean preview so it no longer disagrees with export for supported page-content rectangles.
+
 ## [1.1.2] - 2026-09-25
 
 ### Changed

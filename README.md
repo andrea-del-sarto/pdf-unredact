@@ -1,8 +1,5 @@
 # pdf-unredact
 
-**Version:** `1.1.2`  
-**Repository:** https://github.com/andrea-del-sarto/pdf-unredact
-
 `pdf-unredact` is a PDF redaction analysis and recovery tool. It can inspect PDFs where content is still present underneath visual covers and export a cleaned PDF or a side-by-side comparison while preserving the source PDF's native fonts and page content wherever possible.
 
 The project is a substantially modified fork of **leedrake5/unredact** and is distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE).
@@ -130,7 +127,7 @@ python pdf_unredact.py document.pdf --mode clean --remove all-annotations
 
 ### Clean PDF
 
-`clean` starts from the source PDF and removes selected annotation-based covers without re-typesetting visible text. Text objects, embedded font resources, sizes, colors, positioning, images, and vector graphics are retained wherever the PDF structure permits it.
+`clean` starts from the source PDF and removes supported visual covers without re-typesetting visible text. Annotation-based covers are deleted directly. Recoverable dark rectangles embedded in the page content stream are also removed when `pdf-unredact` can safely isolate the rectangle's drawing block and rewrite that content stream without touching the underlying text. Text objects, embedded font resources, sizes, colors, positioning, images, and unrelated vector graphics are retained wherever the PDF structure permits it.
 
 ### Side-by-side
 
@@ -140,13 +137,20 @@ The left half reproduces the visible original page, including annotation appeara
 
 ## Redaction classification
 
-Detected candidates are classified as:
+Detected candidates now separate two independent questions:
 
-- **Recoverable** — live PDF text overlaps the detected cover.
-- **Probably applied** — a dark redaction-like rectangle is present but no live text is found underneath. This is heuristic and can include legitimate graphics.
-- **Uncertain** — a redaction-like annotation exists but recoverable content cannot be established confidently.
+- **Recoverable** — live PDF text still exists underneath the detected cover.
+- **Removable** — the current exporter can safely remove that cover.
 
-The tool recognizes dedicated PDF Redact annotations and some improvised covers such as opaque black Highlight or Square annotations. It can also inspect dark rectangles in the page drawing stream for analysis purposes.
+Removal methods are reported explicitly:
+
+- `annotation_delete` — the cover is a supported annotation and can be deleted directly;
+- `content_stream_rewrite` — the cover is an isolated dark rectangle in the page content stream and can be removed by conservatively rewriting that drawing block;
+- `unsupported` — live text exists underneath, but the drawing cannot yet be isolated safely enough for automatic removal.
+
+Non-recoverable candidates are still classified as **Probably applied** or **Uncertain**. `Probably applied` remains heuristic because a legitimate dark graphic can resemble a redaction.
+
+The JSON report exposes `recoverable`, `removable`, and `removal_method` separately so a recoverable cover is no longer implied to be automatically removable. The old `recovery_rate` field has been replaced by `hidden_text_percentage`, which correctly means the share of all extracted text characters that lie under detected covers.
 
 ---
 
@@ -154,7 +158,7 @@ The tool recognizes dedicated PDF Redact annotations and some improvised covers 
 
 A properly applied PDF redaction normally removes the underlying content. If the content no longer exists in the PDF, `pdf-unredact` cannot reconstruct it.
 
-The project does not perform OCR, does not bypass encryption or passwords, and should not be treated as proof that every dark graphical region is a redaction.
+The project does not perform OCR, does not bypass encryption or passwords, and should not be treated as proof that every dark graphical region is a redaction. Content-stream rewriting is deliberately conservative. Simple `cm` transforms, safe near-opaque normal-blend ExtGState blocks, `re` rectangles, and rectangular `m/l/h` paths are supported when they can be isolated unambiguously. Complex or non-rectangular paths, clipping, images, unsupported transparency/blend states, or drawing blocks that cannot be isolated safely are reported as unsupported instead of being modified.
 
 Editing or re-saving a PDF can affect digital signatures, certification state, incremental revisions, or evidentiary provenance. Always retain the original document unchanged.
 
@@ -166,7 +170,6 @@ Requirements:
 
 - Python 3.10+
 - `PyMuPDF`
-- `pdfplumber`
 
 With `uv`:
 

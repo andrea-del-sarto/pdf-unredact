@@ -65,7 +65,15 @@
     "github_repo": "Repository GitHub",
     "license_note": "GNU GPLv3 · fork di leedrake5/unredact",
     "close": "Chiudi",
-    "info": "Informazioni"
+    "info": "Informazioni",
+    "removable_plural": "Rimovibili",
+    "unsupported_plural": "Recuperabili, non supportate",
+    "removal": "Rimozione",
+    "removable": "Rimovibile",
+    "not_removable": "Non rimovibile",
+    "not_applicable": "N/D",
+    "removal_annotation": "Elimina annotazione",
+    "removal_stream": "Riscrittura stream"
   },
   "backend": {
     "invalid_page": "Pagina non valida",

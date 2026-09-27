@@ -17,7 +17,8 @@ from pathlib import Path
 import pymupdf
 
 from pdf_unredact import (
-    _remove_annotations,
+    _candidate_from_dict,
+    _clean_document,
     compute_redaction_stats,
     make_clean_pdf,
     make_side_by_side,
@@ -60,12 +61,12 @@ select,.textInput,.pageInput{border:1px solid var(--line);background:var(--surfa
 .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}.uploadCard{padding:16px;margin-bottom:16px}.drop{border:1.5px dashed var(--line-strong);border-radius:13px;padding:34px 18px;text-align:center;cursor:pointer;background:var(--surface-2);transition:.15s}.drop.drag{border-color:var(--focus);background:color-mix(in srgb,var(--focus) 8%,var(--surface-2))}.dropIcon{font-size:28px;line-height:1}.drop h2{font-size:17px;margin:8px 0 3px}.drop p{margin:0;color:var(--muted)}
 .status{color:var(--muted);margin-top:9px;font-size:12px}.error{color:var(--danger);white-space:pre-wrap;margin-top:9px;font-size:12px}.progress{height:5px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin-top:10px}.progress>div{height:100%;width:32%;background:var(--accent);animation:slide 1s infinite ease-in-out}@keyframes slide{from{transform:translateX(-120%)}to{transform:translateX(330%)}}.hidden{display:none!important}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}.mainCol,.sideCol{display:flex;flex-direction:column;gap:16px}.sideCol{position:sticky;top:16px}.fileCard{padding:15px 16px}.fileline{display:flex;justify-content:space-between;gap:14px;align-items:center}.filename{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72vw}.small{font-size:12px;color:var(--muted)}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.metric{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 15px}.metric b{font-size:23px;line-height:1.1;display:block;margin-bottom:5px}.metric span{font-size:12px;color:var(--muted)}.metric.ok b{color:var(--ok)}.metric.warn b{color:var(--warn)}
+.metrics{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}.metric{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 15px}.metric b{font-size:23px;line-height:1.1;display:block;margin-bottom:5px}.metric span{font-size:12px;color:var(--muted)}.metric.ok b{color:var(--ok)}.metric.warn b{color:var(--warn)}
 .previewCard{padding:15px}.sectionHead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}.sectionHead h2{margin:0;font-size:15px}.sectionHead p{margin:2px 0 0;color:var(--muted);font-size:12px}.pageCtl{display:flex;align-items:center;gap:7px}.pageCtl button{min-height:34px;padding:7px 10px}.pageInput{width:65px;padding:7px 8px;text-align:center}.viewer{display:grid;grid-template-columns:1fr 1fr;gap:10px}.paneWrap{min-width:0}.paneTitle{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin:0 0 6px}.pane{background:var(--preview);border-radius:11px;min-height:340px;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:8px;border:1px solid var(--line)}.pane img{max-width:100%;height:auto;display:block;box-shadow:0 3px 15px rgba(0,0,0,.12)}
 .panel{padding:15px}.panel h3{font-size:13px;margin:0 0 10px}.option{display:flex;gap:9px;align-items:flex-start;padding:9px 0;cursor:pointer}.option+.option{border-top:1px solid var(--line)}.option input{margin-top:3px}.option strong{display:block;font-size:13px}.option span{display:block;color:var(--muted);font-size:11px;margin-top:1px}.field{margin-top:12px}.field label{font-size:11px;color:var(--muted);display:block;margin-bottom:5px}.textInput{width:100%}.actions{display:grid;grid-template-columns:1fr;gap:8px;margin-top:14px}.actions .button{width:100%}.exportStatus{text-align:center;min-height:18px;margin-top:7px}.reportActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.reportActions .button,.reportActions button{width:100%;font-size:12px;padding:8px 9px;min-height:36px}
 .findingsCard{padding:15px}.tableWrap{overflow:auto;max-height:330px;border:1px solid var(--line);border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line);white-space:nowrap}th{position:sticky;top:0;background:var(--surface-2);z-index:1;color:var(--muted);font-weight:650}tr:last-child td{border-bottom:0}.chip{display:inline-flex;border-radius:999px;padding:2px 7px;background:var(--surface-2);border:1px solid var(--line);font-size:11px}.chip.ok{color:var(--ok)}.chip.warn{color:var(--warn)}
 .modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.44);display:flex;align-items:center;justify-content:center;padding:20px;z-index:1000}.modal{width:min(430px,100%);background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.3);padding:18px}.modalHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.modalHead h2{font-size:16px;margin:0}.modalClose{width:36px;height:36px;min-height:36px;padding:0}.infoGrid{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px 14px;align-items:start}.infoGrid dt{color:var(--muted);font-size:12px}.infoGrid dd{margin:0;font-weight:650;min-width:0;overflow-wrap:anywhere}.repoLink{color:var(--text);text-decoration:underline;text-underline-offset:3px}.repoLink:hover{opacity:.8}.modalFoot{margin-top:16px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
-@media(max-width:1020px){.workspace{grid-template-columns:1fr}.sideCol{position:static;display:grid;grid-template-columns:1fr 1fr}.sideCol .panel:last-child{grid-column:1/-1}.metrics{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.app{padding:14px 12px 28px}.topbar{height:auto}.viewer,.sideCol{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.fileline{align-items:flex-start}.filename{max-width:55vw}.sectionHead{align-items:flex-start;flex-direction:column}.pageCtl{width:100%;justify-content:flex-end}}
+@media(max-width:1020px){.workspace{grid-template-columns:1fr}.sideCol{position:static;display:grid;grid-template-columns:1fr 1fr}.sideCol .panel:last-child{grid-column:1/-1}.metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:700px){.app{padding:14px 12px 28px}.topbar{height:auto}.viewer,.sideCol{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.fileline{align-items:flex-start}.filename{max-width:55vw}.sectionHead{align-items:flex-start;flex-direction:column}.pageCtl{width:100%;justify-content:flex-end}}
 </style>
 </head>
 <body>
@@ -75,9 +76,9 @@ select,.textInput,.pageInput{border:1px solid var(--line);background:var(--surfa
 <div id="workspace" class="hidden"><div class="workspace">
 <main class="mainCol">
 <section class="card fileCard"><div class="fileline"><div><div class="filename" id="filename"></div><div class="small" id="filemeta"></div></div><button class="secondary" id="replace" data-i18n="change_pdf"></button></div></section>
-<section class="metrics"><div class="metric"><b id="detected">0</b><span data-i18n="detected"></span></div><div class="metric ok"><b id="recoverable">0</b><span data-i18n="recoverable_plural"></span></div><div class="metric warn"><b id="applied">0</b><span data-i18n="probably_applied_plural"></span></div><div class="metric"><b id="uncertain">0</b><span data-i18n="uncertain_plural"></span></div></section>
+<section class="metrics"><div class="metric"><b id="detected">0</b><span data-i18n="detected"></span></div><div class="metric ok"><b id="recoverable">0</b><span data-i18n="recoverable_plural"></span></div><div class="metric ok"><b id="removable">0</b><span data-i18n="removable_plural"></span></div><div class="metric warn"><b id="unsupported">0</b><span data-i18n="unsupported_plural"></span></div><div class="metric warn"><b id="applied">0</b><span data-i18n="probably_applied_plural"></span></div><div class="metric"><b id="uncertain">0</b><span data-i18n="uncertain_plural"></span></div></section>
 <section class="card previewCard"><div class="sectionHead"><div><h2 data-i18n="preview"></h2><p data-i18n="preview_desc"></p></div><div class="pageCtl"><button class="secondary" id="prev" aria-label="" title="">←</button><input class="pageInput" id="page" type="number" min="1" value="1"><span class="small" id="pagesLabel">/ 1</span><button class="secondary" id="next" aria-label="" title="">→</button></div></div><div class="viewer"><div class="paneWrap"><p class="paneTitle" data-i18n="original"></p><div class="pane"><img id="originalPreview" alt=""></div></div><div class="paneWrap"><p class="paneTitle" data-i18n="clean"></p><div class="pane"><img id="cleanPreview" alt=""></div></div></div></section>
-<section class="card findingsCard"><div class="sectionHead"><div><h2 data-i18n="findings"></h2><p id="findingsSummary"></p></div></div><div class="tableWrap"><table><thead><tr><th data-i18n="page"></th><th data-i18n="type"></th><th data-i18n="status"></th><th data-i18n="words"></th><th data-i18n="characters"></th></tr></thead><tbody id="findings"></tbody></table></div></section>
+<section class="card findingsCard"><div class="sectionHead"><div><h2 data-i18n="findings"></h2><p id="findingsSummary"></p></div></div><div class="tableWrap"><table><thead><tr><th data-i18n="page"></th><th data-i18n="type"></th><th data-i18n="status"></th><th data-i18n="removal"></th><th data-i18n="words"></th><th data-i18n="characters"></th></tr></thead><tbody id="findings"></tbody></table></div></section>
 </main>
 <aside class="sideCol">
 <section class="card panel"><h3 data-i18n="output_format"></h3><label class="option"><input type="radio" name="mode" value="clean" checked><span><strong data-i18n="clean_pdf"></strong><span data-i18n="clean_pdf_desc"></span></span></label><label class="option"><input type="radio" name="mode" value="side_by_side"><span><strong>Side-by-side</strong><span data-i18n="side_by_side_desc"></span></span></label></section>
@@ -148,9 +149,10 @@ function removeMode(){return document.querySelector('input[name="remove"]:checke
 function outputDefault(){const stem=(currentFilename||'document.pdf').replace(/\.pdf$/i,'');return stem+(outputMode()==='clean'?'_clean.pdf':'_side_by_side.pdf')}function syncOutputName(force=false){if(force||!outputNameTouched)$('outputName').value=outputDefault()}
 function apiHeaders(extra={}){return Object.assign({'X-Language':language},extra)}
 async function upload(f){if(!f)return;if(f.type&&f.type!=='application/pdf'&&!f.name.toLowerCase().endsWith('.pdf')){statusKey('select_pdf',true);return}$('uploadProgress').classList.remove('hidden');statusKey('analyzing');$('workspace').classList.add('hidden');try{const r=await fetch('/api/upload',{method:'POST',headers:apiHeaders({'Content-Type':'application/pdf','X-Filename':encodeURIComponent(f.name)}),body:f});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('open_error'));job=d.job_id;pages=d.pages;current=1;currentFilename=d.filename;currentFileSize=f.size;currentStats=d.stats;outputNameTouched=false;$('filename').textContent=d.filename;$('filemeta').textContent=`${fmt(d.pages)} ${tr('pages')} · ${human(f.size)}`;renderStats(d.stats);$('pagesLabel').textContent=`/ ${pages}`;$('page').max=pages;$('page').value=1;syncOutputName(true);$('jsonReport').href=`/api/report/${job}?lang=${language}`;$('jsonReport').download=currentFilename.replace(/\.pdf$/i,'')+'_audit.json';$('workspace').classList.remove('hidden');statusKey('analysis_complete');await refreshPreview()}catch(e){status(e.message,true)}finally{$('uploadProgress').classList.add('hidden')}}
-function renderStats(stats){currentStats=stats;$('detected').textContent=fmt(stats.redaction_boxes_found);$('recoverable').textContent=fmt(stats.recoverable_redactions);$('applied').textContent=fmt(stats.probable_applied_redactions);$('uncertain').textContent=fmt(stats.uncertain_redactions);renderFindings(stats.findings||[])}
+function renderStats(stats){currentStats=stats;$('detected').textContent=fmt(stats.redaction_boxes_found);$('recoverable').textContent=fmt(stats.recoverable_redactions);$('removable').textContent=fmt(stats.removable_redactions);$('unsupported').textContent=fmt(stats.unsupported_recoverable_redactions);$('applied').textContent=fmt(stats.probable_applied_redactions);$('uncertain').textContent=fmt(stats.uncertain_redactions);renderFindings(stats.findings||[])}
 function sourceLabel(source){return source==='annotation:redact'?tr('source_redact'):source==='annotation:highlight'?tr('source_highlight'):source==='annotation:square'?tr('source_square'):source==='dark_rectangle'?tr('source_rectangle'):source}
-function renderFindings(arr){$('findingsSummary').textContent=`${fmt(arr.length)} ${tr('areas_detected')}`;const tbody=$('findings');tbody.innerHTML='';for(const x of arr.slice(0,1000)){const trEl=document.createElement('tr');const st=x.recoverable?`<span class="chip ok">${tr('recoverable')}</span>`:x.probable_applied?`<span class="chip warn">${tr('probably_applied')}</span>`:`<span class="chip">${tr('uncertain')}</span>`;trEl.innerHTML=`<td>${x.page}</td><td>${escapeHtml(sourceLabel(x.source))}</td><td>${st}</td><td>${fmt(x.words_under)}</td><td>${fmt(x.chars_under)}</td>`;tbody.appendChild(trEl)}}
+function removalLabel(x){if(!x.recoverable)return `<span class="chip">${tr('not_applicable')}</span>`;if(x.removal_method==='annotation_delete')return `<span class="chip ok">${tr('removal_annotation')}</span>`;if(x.removal_method==='content_stream_rewrite')return `<span class="chip ok">${tr('removal_stream')}</span>`;return `<span class="chip warn">${tr('not_removable')}</span>`}
+function renderFindings(arr){$('findingsSummary').textContent=`${fmt(arr.length)} ${tr('areas_detected')}`;const tbody=$('findings');tbody.innerHTML='';for(const x of arr.slice(0,1000)){const trEl=document.createElement('tr');const st=x.recoverable?`<span class="chip ok">${tr('recoverable')}</span>`:x.probable_applied?`<span class="chip warn">${tr('probably_applied')}</span>`:`<span class="chip">${tr('uncertain')}</span>`;trEl.innerHTML=`<td>${x.page}</td><td>${escapeHtml(sourceLabel(x.source))}</td><td>${st}</td><td>${removalLabel(x)}</td><td>${fmt(x.words_under)}</td><td>${fmt(x.chars_under)}</td>`;tbody.appendChild(trEl)}}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function refreshPreview(){if(!job)return;current=Math.max(1,Math.min(pages,parseInt($('page').value)||1));$('page').value=current;const rm=encodeURIComponent(removeMode()),t=Date.now();$('originalPreview').src=`/api/preview/${job}/original/${current}?lang=${language}&t=${t}`;$('cleanPreview').src=`/api/preview/${job}/clean/${current}?remove=${rm}&lang=${language}&t=${t}`}
 async function refreshAudit(){if(!job)return;const btn=$('refreshAudit');btn.disabled=true;try{const r=await fetch(`/api/audit/${job}`,{method:'POST',headers:apiHeaders()});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('analysis_error'));renderStats(d.stats)}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message}finally{btn.disabled=false}}
@@ -200,13 +202,14 @@ def _message(key, lang="en"):
     return translate(key, lang, section="backend")
 
 
-def _render_preview(path, page_number, kind, remove_mode, lang="en"):
+def _render_preview(path, page_number, kind, remove_mode, stats_dict=None, lang="en"):
     doc = pymupdf.open(path)
     try:
         if page_number < 1 or page_number > doc.page_count:
             raise ValueError(_message("invalid_page", lang))
         if kind == "clean":
-            _remove_annotations(doc, mode=remove_mode)
+            findings = [_candidate_from_dict(x) for x in (stats_dict or {}).get("findings", [])]
+            _clean_document(doc, findings, remove=remove_mode, page_numbers=[page_number])
         page = doc[page_number - 1]
         pix = page.get_pixmap(matrix=pymupdf.Matrix(1.35, 1.35), alpha=False, annots=True)
         return pix.tobytes("png")
@@ -281,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
                 remove_mode = qs.get("remove", ["redactions"])[0]
                 if remove_mode not in {"redactions", "all-annotations"}:
                     remove_mode = "redactions"
-                png = _render_preview(meta["input"], page_no, kind, remove_mode, self._lang(parsed))
+                png = _render_preview(meta["input"], page_no, kind, remove_mode, meta.get("stats"), self._lang(parsed))
                 self._send(200, png, "image/png")
             except Exception as exc:
                 self._json(400, {"error": str(exc)})
@@ -384,11 +387,11 @@ class Handler(BaseHTTPRequestHandler):
                 output_name = _safe_filename(requested_name) if requested_name else stem + suffix
                 output = os.path.join(meta["dir"], output_name)
                 if mode == "clean":
-                    make_clean_pdf(meta["input"], output, remove=remove)
+                    result = make_clean_pdf(meta["input"], output, remove=remove)
                 else:
-                    make_side_by_side(meta["input"], output, remove=remove)
+                    result = make_side_by_side(meta["input"], output, remove=remove)
                 meta["last_output"] = output
-                self._json(200, {"filename": os.path.basename(output), "download_url": f"/api/download/{job_id}"})
+                self._json(200, {"filename": os.path.basename(output), "download_url": f"/api/download/{job_id}", "clean_result": result.to_dict()})
             except Exception as exc:
                 self._json(400, {"error": str(exc)})
             return
