@@ -76,7 +76,11 @@ Use another port:
 python pdf_unredact.py --web --port 9000
 ```
 
-Prevent automatic browser opening:
+By default, the local web UI is opened in a **normal dedicated window sized/maximized to the available screen**, not in browser full-screen / kiosk mode. The title bar and normal window controls remain available. Chromium-family browsers are started maximized; Firefox-family browsers are given the detected screen dimensions as a best-effort cross-platform equivalent. `pdf-unredact` supports Chromium-family browsers (Chrome, Chromium, Edge and common derivatives such as Brave/Vivaldi/Opera) and Firefox-family browsers (Firefox plus compatible derivatives such as LibreWolf/Waterfox/Floorp/Zen when installed). A temporary profile is created for the session and the operating system default browser / normal personal profile are not used. Browser security sandboxes remain enabled.
+
+On macOS, Safari and Safari-derived browsers are not auto-launched because Safari does not expose a supported command-line mechanism for a disposable isolated profile suitable for this launcher. If no compatible Chromium- or Firefox-family browser is available, `pdf-unredact` prints the local URL instead of silently falling back to the default browser.
+
+Prevent automatic browser-window opening entirely:
 
 ```bash
 python pdf_unredact.py --web --no-browser

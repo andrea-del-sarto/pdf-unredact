@@ -7,7 +7,6 @@ import threading
 import time
 import urllib.parse
 import uuid
-import webbrowser
 import subprocess
 import sys
 from http import HTTPStatus
@@ -416,35 +415,227 @@ def _create_server(preferred_port=8765):
     return server, int(server.server_address[1])
 
 
-def _open_browser_silent(url: str) -> None:
-    """Open the local UI without forwarding browser launcher output to the terminal."""
-    try:
-        if sys.platform.startswith("linux"):
-            subprocess.Popen(
-                ["xdg-open", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return
-        if sys.platform == "darwin":
-            subprocess.Popen(
-                ["open", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return
-        if os.name == "nt":
-            os.startfile(url)  # type: ignore[attr-defined]
-            return
-    except (OSError, subprocess.SubprocessError):
-        pass
+def _dedupe_browser_candidates(candidates: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for candidate in candidates:
+        key = (candidate["family"], os.path.normcase(candidate["path"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
 
-    # Portable fallback for uncommon environments.
-    webbrowser.open(url)
+
+def _sandbox_browser_candidates() -> list[dict]:
+    """Return browsers that can provide a dedicated isolated maximized session.
+
+    Chromium-family browsers are launched with an ephemeral ``--user-data-dir``.
+    Firefox-family browsers are launched as a new instance with an ephemeral
+    ``-profile`` directory. Safari is intentionally not returned: current Safari
+    releases do not expose a supported command-line mechanism for a throw-away
+    isolated profile suitable for this launcher.
+    """
+    candidates: list[dict] = []
+
+    if os.name == "nt":
+        roots = [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]
+        chromium_relpaths = [
+            ("Chrome", r"Google\Chrome\Application\chrome.exe"),
+            ("Edge", r"Microsoft\Edge\Application\msedge.exe"),
+            ("Chromium", r"Chromium\Application\chrome.exe"),
+            ("Brave", r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+            ("Vivaldi", r"Vivaldi\Application\vivaldi.exe"),
+        ]
+        firefox_relpaths = [
+            ("Firefox", r"Mozilla Firefox\firefox.exe"),
+            ("LibreWolf", r"LibreWolf\librewolf.exe"),
+            ("Waterfox", r"Waterfox\waterfox.exe"),
+            ("Floorp", r"Ablaze Floorp\floorp.exe"),
+            ("Zen", r"Zen Browser\zen.exe"),
+        ]
+        for root in roots:
+            if not root:
+                continue
+            for name, rel in chromium_relpaths:
+                path = os.path.join(root, rel)
+                if os.path.isfile(path):
+                    candidates.append({"family": "chromium", "path": path, "name": name})
+            for name, rel in firefox_relpaths:
+                path = os.path.join(root, rel)
+                if os.path.isfile(path):
+                    candidates.append({"family": "firefox", "path": path, "name": name})
+        return _dedupe_browser_candidates(candidates)
+
+    if sys.platform == "darwin":
+        chromium_apps = [
+            ("Chrome", "Google Chrome.app", "Google Chrome"),
+            ("Edge", "Microsoft Edge.app", "Microsoft Edge"),
+            ("Chromium", "Chromium.app", "Chromium"),
+            ("Brave", "Brave Browser.app", "Brave Browser"),
+            ("Vivaldi", "Vivaldi.app", "Vivaldi"),
+            ("Opera", "Opera.app", "Opera"),
+        ]
+        firefox_apps = [
+            ("Firefox", "Firefox.app", "firefox"),
+            ("Firefox Developer Edition", "Firefox Developer Edition.app", "firefox"),
+            ("LibreWolf", "LibreWolf.app", "librewolf"),
+            ("Waterfox", "Waterfox.app", "waterfox"),
+            ("Floorp", "Floorp.app", "floorp"),
+            ("Zen", "Zen.app", "zen"),
+        ]
+        app_roots = ["/Applications", os.path.expanduser("~/Applications")]
+        for app_root in app_roots:
+            for name, app, binary in chromium_apps:
+                path = os.path.join(app_root, app, "Contents", "MacOS", binary)
+                if os.path.isfile(path):
+                    candidates.append({"family": "chromium", "path": path, "name": name})
+            for name, app, binary in firefox_apps:
+                path = os.path.join(app_root, app, "Contents", "MacOS", binary)
+                if os.path.isfile(path):
+                    candidates.append({"family": "firefox", "path": path, "name": name})
+        return _dedupe_browser_candidates(candidates)
+
+    if sys.platform.startswith("linux"):
+        chromium_names = [
+            ("Chrome", "google-chrome"),
+            ("Chrome", "google-chrome-stable"),
+            ("Chromium", "chromium"),
+            ("Chromium", "chromium-browser"),
+            ("Edge", "microsoft-edge"),
+            ("Edge", "microsoft-edge-stable"),
+            ("Brave", "brave-browser"),
+            ("Vivaldi", "vivaldi"),
+            ("Vivaldi", "vivaldi-stable"),
+            ("Opera", "opera"),
+        ]
+        firefox_names = [
+            ("Firefox", "firefox"),
+            ("Firefox ESR", "firefox-esr"),
+            ("LibreWolf", "librewolf"),
+            ("Waterfox", "waterfox"),
+            ("Floorp", "floorp"),
+            ("Zen", "zen-browser"),
+            ("Zen", "zen"),
+        ]
+        for name, executable in chromium_names:
+            path = shutil.which(executable)
+            if path:
+                candidates.append({"family": "chromium", "path": path, "name": name})
+        for name, executable in firefox_names:
+            path = shutil.which(executable)
+            if path:
+                candidates.append({"family": "firefox", "path": path, "name": name})
+
+    return _dedupe_browser_candidates(candidates)
+
+
+def _cleanup_browser_profile(process: subprocess.Popen, profile_dir: str) -> None:
+    try:
+        process.wait()
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def _screen_size() -> tuple[int, int] | None:
+    """Best-effort primary-screen dimensions without adding a runtime dependency."""
+    try:
+        import tkinter
+
+        root = tkinter.Tk()
+        root.withdraw()
+        width = int(root.winfo_screenwidth())
+        height = int(root.winfo_screenheight())
+        root.destroy()
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+    return None
+
+
+def _browser_launch_args(candidate: dict, url: str, profile_dir: str) -> list[str]:
+    family = candidate["family"]
+    executable = candidate["path"]
+
+    if family == "chromium":
+        return [
+            executable,
+            f"--app={url}",
+            "--start-maximized",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+        ]
+
+    if family == "firefox":
+        # -profile / -no-remote keep the session separate from the user's
+        # normal profile and any already-running Firefox instance. We deliberately
+        # avoid kiosk mode: this must remain a normal resizable window with title
+        # bar and window controls. Firefox has no portable start-maximized switch,
+        # so request the current screen dimensions as a best-effort equivalent.
+        args = [
+            executable,
+            "-no-remote",
+            "-new-instance",
+            "-profile",
+            profile_dir,
+        ]
+        screen_size = _screen_size()
+        if screen_size:
+            width, height = screen_size
+            args.extend(["--width", str(width), "--height", str(height)])
+        args.extend(["-private-window", url])
+        return args
+
+    raise ValueError(f"Unsupported browser family: {family}")
+
+
+def _open_sandbox_browser(url: str) -> str | None:
+    """Open the UI in an isolated dedicated browser window.
+
+    The operating-system default browser and normal user profiles are never used.
+    Chromium-family browsers use a temporary user-data directory and request a
+    maximized app window. Firefox-family browsers use a temporary profile and a
+    normal private window (never kiosk / true full-screen). Browser security
+    sandboxes remain enabled.
+
+    Returns the launched browser display name, or ``None`` if no compatible
+    browser could be started.
+    """
+    for candidate in _sandbox_browser_candidates():
+        profile_dir = tempfile.mkdtemp(prefix="pdf-unredact-browser-")
+        args = _browser_launch_args(candidate, url, profile_dir)
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=(os.name != "nt"),
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                    if os.name == "nt"
+                    else 0
+                ),
+            )
+        except (OSError, subprocess.SubprocessError):
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            continue
+
+        threading.Thread(
+            target=_cleanup_browser_profile,
+            args=(process, profile_dir),
+            daemon=True,
+        ).start()
+        return candidate["name"]
+
+    return None
 
 
 def run_web(port=8765, open_browser=True):
@@ -457,7 +648,14 @@ def run_web(port=8765, open_browser=True):
     print(translate("open_url", console_lang, url=url))
     print(translate("press_stop", console_lang))
     if open_browser:
-        threading.Timer(0.6, lambda: _open_browser_silent(url)).start()
+        def launch_ui() -> None:
+            browser_name = _open_sandbox_browser(url)
+            if browser_name:
+                print(translate("sandbox_browser_started", console_lang, browser=browser_name))
+            else:
+                print(translate("sandbox_browser_unavailable", console_lang, url=url))
+
+        threading.Timer(0.6, launch_ui).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

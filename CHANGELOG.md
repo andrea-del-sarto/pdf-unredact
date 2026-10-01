@@ -4,10 +4,27 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-01
+
+### Added
+
+- Added screen-sized/maximized startup for the isolated local web UI without entering true browser full-screen. Chromium-family browsers use app mode with maximized startup; Firefox-family browsers use a normal isolated private window sized to the detected screen as a best-effort cross-platform equivalent. Window decorations and normal window controls remain available.
+- Added isolated launcher support for Firefox and compatible Firefox-derived browsers on Windows, macOS, and Linux.
+- Added discovery for common Chromium derivatives including Brave, Vivaldi, and Opera, plus Firefox derivatives such as LibreWolf, Waterfox, Floorp, and Zen where installed.
+
+### Changed
+
+- Browser startup now tries compatible isolated browsers in priority order instead of being limited to Chrome/Chromium/Edge.
+- Chromium sessions continue to use an ephemeral `--user-data-dir`; Firefox-family sessions use an ephemeral `-profile` together with `-no-remote` / `-new-instance`.
+- The operating system default browser is still never opened automatically, and browser security sandboxes remain enabled.
+- Safari is intentionally not auto-launched on macOS because it does not provide a supported command-line mechanism for the disposable isolated profile required by this launcher.
+
 ## [1.2.1] - 2026-09-27
 
 ### Changed
 
+- The local web UI no longer opens the operating system default browser automatically. It now launches a dedicated Chromium-family app window with an ephemeral isolated profile when Chrome, Chromium, or Edge is available.
+- The browser security sandbox remains enabled; `pdf-unredact` does not pass `--no-sandbox`. If no supported Chromium-family browser is found, the server prints the local URL instead of falling back to the user's default browser.
 - Export diagnostics now distinguish recoverable-but-unsupported rectangles from content-stream rewrite failures.
 - `CleanResult` now reports `rewrite_attempts`, `rewrite_successes`, and `rewrite_failures` separately from `unsupported_recoverable_rectangles`.
 - Clean and side-by-side exports now validate that the saved PDF can be reopened and that the expected page count is preserved.

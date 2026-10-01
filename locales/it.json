@@ -92,6 +92,8 @@
     "port_in_use": "La porta {port} è già in uso; verrà usata la porta {actual}.",
     "open_url": "Apri: {url}",
     "press_stop": "Premi Ctrl+C per arrestare.",
-    "stopped": "Arrestato. File temporanei rimossi."
+    "stopped": "Arrestato. File temporanei rimossi.",
+    "sandbox_browser_started": "Aperto a schermo intero in una sessione {browser} isolata con profilo temporaneo.",
+    "sandbox_browser_unavailable": "Nessun browser compatibile della famiglia Chromium o Firefox trovato. Il browser predefinito non è stato aperto; apri manualmente questo URL: {url}"
   }
 }

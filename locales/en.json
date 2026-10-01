@@ -92,6 +92,8 @@
     "port_in_use": "Port {port} is already in use; using port {actual} instead.",
     "open_url": "Open: {url}",
     "press_stop": "Press Ctrl+C to stop.",
-    "stopped": "Stopped. Temporary files removed."
+    "stopped": "Stopped. Temporary files removed.",
+    "sandbox_browser_started": "Opened full-screen in an isolated {browser} session with a temporary profile.",
+    "sandbox_browser_unavailable": "No compatible Chromium- or Firefox-family browser was found. The default browser was not opened; open this URL manually: {url}"
   }
 }
