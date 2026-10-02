@@ -7,8 +7,7 @@ from typing import List, Tuple
 
 import pymupdf
 
-
-__version__ = "1.3.0"
+from version import __version__
 
 
 BBox = Tuple[float, float, float, float]

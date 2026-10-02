@@ -83,7 +83,7 @@
     "file_unavailable": "File non disponibile",
     "not_found": "Non trovato",
     "empty_file": "File vuoto",
-    "too_large": "PDF troppo grande (limite 500 MB)",
+    "too_large": "PDF troppo grande (limite {limit_mb} MB)",
     "invalid_pdf": "Il file non sembra essere un PDF valido",
     "password": "PDF protetto da password: non supportato in questa versione",
     "cannot_analyze": "Impossibile analizzare il PDF",
@@ -93,7 +93,8 @@
     "open_url": "Apri: {url}",
     "press_stop": "Premi Ctrl+C per arrestare.",
     "stopped": "Arrestato. File temporanei rimossi.",
-    "sandbox_browser_started": "Aperto a schermo intero in una sessione {browser} isolata con profilo temporaneo.",
-    "sandbox_browser_unavailable": "Nessun browser compatibile della famiglia Chromium o Firefox trovato. Il browser predefinito non è stato aperto; apri manualmente questo URL: {url}"
+    "sandbox_browser_started": "Aperto in una finestra {browser} isolata e massimizzata con profilo temporaneo.",
+    "sandbox_browser_unavailable": "Nessun browser compatibile della famiglia Chromium o Firefox trovato. Il browser predefinito non è stato aperto; apri manualmente questo URL: {url}",
+    "processing_failed": "Impossibile elaborare il PDF in modo sicuro."
   }
 }

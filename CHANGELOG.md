@@ -4,6 +4,43 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-10-02
+
+### Added
+
+- Added a short-lived isolated PDF worker process for web audits, previews, and exports so untrusted PDF parsing no longer occurs inside the HTTP server process.
+- Added worker execution timeouts, bounded PDF-processing concurrency, page-count and preview-pixel limits, and best-effort CPU, file-size, file-descriptor, and Linux address-space limits.
+- Added a random per-launch session secret. The initial local URL includes the secret once, the server exchanges it for an HttpOnly `SameSite=Strict` session cookie, and the frontend removes the token from the visible URL after startup.
+- Added Host and same-origin validation for local API requests to reduce localhost / DNS-rebinding and cross-origin request exposure.
+- Added per-job locks for audit, preview, export, report, download, and cleanup operations.
+- Added a job cleanup API used when a document is replaced or the UI page is closed.
+- Added stale temporary-directory cleanup at startup plus `atexit`, SIGINT, and SIGTERM cleanup paths for document data and isolated browser profiles.
+- Added stricter HTTP security headers including `Referrer-Policy`, `Cross-Origin-Resource-Policy`, `Cross-Origin-Opener-Policy`, `Permissions-Policy`, and `X-Frame-Options` defense in depth.
+
+### Changed
+
+- Uploads are now streamed to a private temporary file in chunks instead of being read completely into memory before analysis.
+- The default web upload limit is now 250 MB and can be overridden with `PDF_UNREDACT_MAX_UPLOAD_MB`; JSON request bodies are separately size-limited.
+- Browser-facing failures now return generic localized messages while technical details stay in local logs; set `PDF_UNREDACT_DEBUG=1` for verbose worker diagnostics.
+- Frontend JavaScript and CSS are now served as same-origin static resources, allowing the Content Security Policy to remove `unsafe-inline` from both `script-src` and `style-src`.
+- PDF downloads are streamed rather than loaded completely into server memory and the temporary exported copy is removed after delivery.
+- Linux browser discovery now searches trusted installation directories instead of executing an arbitrary browser found through the current `PATH`; automatic browser launch is disabled when the app is run as root.
+- Runtime version metadata is centralized in `version.py`, and package metadata now includes the isolated worker and static web assets.
+
+### Fixed
+
+- Reduced the risk of memory exhaustion from large uploads, oversized previews, parallel PDF work, and oversized API request bodies.
+- Prevented concurrent operations on the same job from racing while rewriting or deleting temporary files.
+- Prevented raw parser exceptions and local filesystem details from being returned directly to the web interface.
+- Hardened temporary file permissions on supported platforms and cleanup behavior after normal shutdown, signals, document replacement, and later restarts after an unclean exit.
+
+### Fixed
+- Fixed worker startup for source installations where PyMuPDF is installed in the same interpreter's user-site packages. The web worker no longer uses Python isolated mode (`-I`) or suppresses the user-site while still receiving a strict allow-listed environment with `PYTHONPATH` / `PYTHONHOME` excluded.
+- Worker import/bootstrap failures now write a structured result when possible, so missing or incompatible dependencies are diagnosed instead of being reported only as an unexpected worker termination.
+- Disabled the Linux `RLIMIT_AS` memory cap by default. Virtual-address-space limits can terminate PyMuPDF/MuPDF workers even when real memory use is modest; deployments may still opt in with `PDF_UNREDACT_WORKER_MEMORY_MB`.
+- Worker failures that occur before a result file is produced are now diagnosed explicitly in local logs instead of being indistinguishable from normal PDF-processing errors.
+- Added a lightweight worker probe used to verify that the isolated PyMuPDF engine can start successfully.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

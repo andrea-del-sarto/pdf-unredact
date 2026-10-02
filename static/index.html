@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="it" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pdf-unredact</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+<header class="topbar"><div class="brand"><div class="logo">PU</div><div class="brandText"><h1>pdf-unredact</h1></div></div><div class="controls"><button id="infoButton" class="iconButton" type="button" aria-label="" title=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></button><button id="languageButton" class="languageButton" type="button" aria-label="" title="">IT</button><button id="themeButton" class="iconButton" type="button" aria-label="" title=""></button></div></header>
+<section class="card uploadCard" id="uploadCard"><div class="drop" id="drop"><div class="dropIcon">⇧</div><h2 data-i18n="open_pdf"></h2><p data-i18n="drop_pdf"></p><input id="file" type="file" accept="application/pdf,.pdf" hidden></div><div id="uploadStatus" class="status"></div><div id="uploadProgress" class="progress hidden"><div></div></div></section>
+<div id="workspace" class="hidden"><div class="workspace">
+<main class="mainCol">
+<section class="card fileCard"><div class="fileline"><div><div class="filename" id="filename"></div><div class="small" id="filemeta"></div></div><button class="secondary" id="replace" data-i18n="change_pdf"></button></div></section>
+<section class="metrics"><div class="metric"><b id="detected">0</b><span data-i18n="detected"></span></div><div class="metric ok"><b id="recoverable">0</b><span data-i18n="recoverable_plural"></span></div><div class="metric ok"><b id="removable">0</b><span data-i18n="removable_plural"></span></div><div class="metric warn"><b id="unsupported">0</b><span data-i18n="unsupported_plural"></span></div><div class="metric warn"><b id="applied">0</b><span data-i18n="probably_applied_plural"></span></div><div class="metric"><b id="uncertain">0</b><span data-i18n="uncertain_plural"></span></div></section>
+<section class="card previewCard"><div class="sectionHead"><div><h2 data-i18n="preview"></h2><p data-i18n="preview_desc"></p></div><div class="pageCtl"><button class="secondary" id="prev" aria-label="" title="">←</button><input class="pageInput" id="page" type="number" min="1" value="1"><span class="small" id="pagesLabel">/ 1</span><button class="secondary" id="next" aria-label="" title="">→</button></div></div><div class="viewer"><div class="paneWrap"><p class="paneTitle" data-i18n="original"></p><div class="pane"><img id="originalPreview" alt=""></div></div><div class="paneWrap"><p class="paneTitle" data-i18n="clean"></p><div class="pane"><img id="cleanPreview" alt=""></div></div></div></section>
+<section class="card findingsCard"><div class="sectionHead"><div><h2 data-i18n="findings"></h2><p id="findingsSummary"></p></div></div><div class="tableWrap"><table><thead><tr><th data-i18n="page"></th><th data-i18n="type"></th><th data-i18n="status"></th><th data-i18n="removal"></th><th data-i18n="words"></th><th data-i18n="characters"></th></tr></thead><tbody id="findings"></tbody></table></div></section>
+</main>
+<aside class="sideCol">
+<section class="card panel"><h3 data-i18n="output_format"></h3><label class="option"><input type="radio" name="mode" value="clean" checked><span><strong data-i18n="clean_pdf"></strong><span data-i18n="clean_pdf_desc"></span></span></label><label class="option"><input type="radio" name="mode" value="side_by_side"><span><strong>Side-by-side</strong><span data-i18n="side_by_side_desc"></span></span></label></section>
+<section class="card panel"><h3 data-i18n="annotations"></h3><label class="option"><input type="radio" name="remove" value="redactions" checked><span><strong data-i18n="redactions_only"></strong><span data-i18n="redactions_only_desc"></span></span></label><label class="option"><input type="radio" name="remove" value="all-annotations"><span><strong data-i18n="all_annotations"></strong><span data-i18n="all_annotations_desc"></span></span></label></section>
+<section class="card panel"><h3 data-i18n="export_heading"></h3><div class="field"><label for="outputName" data-i18n="filename"></label><input class="textInput" id="outputName" type="text" autocomplete="off" spellcheck="false"></div><div class="actions"><button id="export" data-i18n="export_pdf"></button></div><div id="exportStatus" class="small exportStatus"></div><div class="reportActions"><a id="jsonReport" class="button secondary" href="#" download data-i18n="json_report"></a><button class="secondary" id="refreshAudit" data-i18n="refresh_analysis"></button></div></section>
+</aside>
+</div></div>
+</div>
+<div id="infoModal" class="modalBackdrop hidden" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
+  <div class="modal">
+    <div class="modalHead"><h2 id="infoTitle" data-i18n="about_title"></h2><button id="infoClose" class="iconButton modalClose" type="button" aria-label="" title=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <dl class="infoGrid">
+      <dt data-i18n="app_name"></dt><dd>pdf-unredact</dd>
+      <dt data-i18n="version"></dt><dd>__APP_VERSION__</dd>
+      <dt data-i18n="github_repo"></dt><dd><a class="repoLink" href="__APP_REPOSITORY__" target="_blank" rel="noopener noreferrer">__APP_REPOSITORY__</a></dd>
+    </dl>
+    <div class="modalFoot" data-i18n="license_note"></div>
+  </div>
+</div>
+<script src="/static/app.js" defer></script>
+</body></html>

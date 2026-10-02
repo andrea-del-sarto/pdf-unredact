@@ -14,7 +14,7 @@ Start the interface with:
 python pdf_unredact.py --web
 ```
 
-The app prefers `http://127.0.0.1:8765/`. If that port is already occupied, it automatically selects a free port and prints the address actually in use.
+The app prefers `http://127.0.0.1:8765/`. If that port is already occupied, it automatically selects a free port and prints the address actually in use. Since 1.4.0 the printed startup URL contains a random one-time session token; the browser exchanges it for a local HttpOnly session cookie and then removes the token from the visible address.
 
 The interface is designed as the basis for a desktop application on Windows, macOS, and Linux while keeping the same PDF-processing engine and workflow.
 
@@ -85,6 +85,16 @@ Prevent automatic browser-window opening entirely:
 ```bash
 python pdf_unredact.py --web --no-browser
 ```
+
+### Local security hardening
+
+The web interface remains bound to `127.0.0.1`, but local-only binding is not the only protection. The 1.4.0 web host also uses a random per-launch session secret, validates the `Host` header and request origin, and requires the session cookie for API access. JavaScript and CSS are served as separate same-origin resources under a strict Content Security Policy without `unsafe-inline`.
+
+Untrusted PDF parsing for web operations is delegated to a short-lived worker process rather than being performed by the HTTP server itself. Worker execution is bounded by timeouts and concurrency limits, with best-effort operating-system CPU, output-size, and file-descriptor limits. On Linux, an address-space memory cap can be enabled explicitly with `PDF_UNREDACT_WORKER_MEMORY_MB`; it is disabled by default because native PDF libraries may reserve large virtual address ranges without consuming equivalent physical RAM. Uploads are streamed to private temporary files instead of being buffered fully in memory. Preview dimensions, page count, JSON request sizes, and upload size are also bounded.
+
+Temporary document data is removed when a document is replaced, when the UI closes where the browser permits the cleanup request, on normal application shutdown, on SIGINT/SIGTERM, and by stale-directory cleanup on a later launch after an unclean exit. Exported temporary PDFs are removed after they are delivered to the browser.
+
+The defaults can be adjusted for unusually large workloads with environment variables such as `PDF_UNREDACT_MAX_UPLOAD_MB`, `PDF_UNREDACT_MAX_PAGES`, `PDF_UNREDACT_MAX_WORKERS`, `PDF_UNREDACT_AUDIT_TIMEOUT`, `PDF_UNREDACT_PREVIEW_TIMEOUT`, and `PDF_UNREDACT_EXPORT_TIMEOUT`. Security limits should only be raised when needed.
 
 ---
 

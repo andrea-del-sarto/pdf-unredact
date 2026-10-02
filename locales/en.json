@@ -83,7 +83,7 @@
     "file_unavailable": "File unavailable",
     "not_found": "Not found",
     "empty_file": "Empty file",
-    "too_large": "PDF too large (500 MB limit)",
+    "too_large": "PDF too large (limit {limit_mb} MB)",
     "invalid_pdf": "The file does not appear to be a valid PDF",
     "password": "Password-protected PDFs are not supported in this version",
     "cannot_analyze": "Unable to analyze the PDF",
@@ -93,7 +93,8 @@
     "open_url": "Open: {url}",
     "press_stop": "Press Ctrl+C to stop.",
     "stopped": "Stopped. Temporary files removed.",
-    "sandbox_browser_started": "Opened full-screen in an isolated {browser} session with a temporary profile.",
-    "sandbox_browser_unavailable": "No compatible Chromium- or Firefox-family browser was found. The default browser was not opened; open this URL manually: {url}"
+    "sandbox_browser_started": "Opened in a maximized isolated {browser} window with a temporary profile.",
+    "sandbox_browser_unavailable": "No compatible Chromium- or Firefox-family browser was found. The default browser was not opened; open this URL manually: {url}",
+    "processing_failed": "The PDF could not be processed safely."
   }
 }
