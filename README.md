@@ -72,8 +72,8 @@ You can:
 - run automatic redaction analysis;
 - inspect analysis statistics;
 - download a detailed JSON report;
-- preview original and cleaned pages;
-- inspect page-by-page findings;
+- preview original and cleaned pages, with an optional full-screen comparison view;
+- inspect page-by-page finding details in a section collapsed by default;
 - manually refresh the analysis.
 
 The CLI-only `--port` and `--no-browser` options control how the local web host is started; they are not document-processing settings.
@@ -147,27 +147,38 @@ Since version **1.4.0**, the web host also uses:
 
 ### Isolated PDF processing
 
-Untrusted PDF parsing for web operations is delegated to a short-lived worker process instead of being performed directly by the HTTP server.
+Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.2**, `EngineClient` also owns its private temporary workspace and exposes opaque analysis handles instead of audit/temp paths, so a future Tauri or Flutter frontend can reuse the boundary without receiving internal filesystem details.
 
 Worker execution is bounded by:
 
 - timeouts;
 - concurrency limits;
+- a parent-side resident-memory (RSS) monitor;
 - best-effort CPU limits;
 - output-size limits;
 - file-descriptor limits.
 
-On Linux, an address-space memory cap can be enabled with:
+The parent process monitors the worker's resident memory on supported Windows, macOS, and Linux systems. The default limit is 1536 MB and can be adjusted or disabled with:
+
+```text
+PDF_UNREDACT_WORKER_MAX_RSS_MB
+```
+
+A value of `0` disables the RSS cap.
+
+On Linux, an additional address-space memory cap can be enabled with:
 
 ```text
 PDF_UNREDACT_WORKER_MEMORY_MB
 ```
 
-It is disabled by default because native PDF libraries may reserve large virtual address ranges without consuming the same amount of physical RAM.
+The address-space cap is disabled by default because native PDF libraries may reserve large virtual address ranges without consuming the same amount of physical RAM.
 
-Uploads are streamed to private temporary files rather than buffered entirely in memory. Preview dimensions, page count, JSON request size, and upload size are also bounded.
+Uploads are streamed to private temporary files rather than buffered entirely in memory. Preview dimensions, page count, JSON request size, input size, output size, active job count, total workspace use, and minimum free-disk headroom are also bounded.
 
-Temporary document data is removed when:
+Since **1.4.1**, exported PDFs are sanitized by default to remove active or attached content such as PDF JavaScript, active links/actions, and embedded files. In **1.4.2**, sanitization can be disabled explicitly; when enabled, the saved PDF is reopened and verified fail-closed before it is returned. Hidden text and redaction content remain preserved so recoverable text is not destroyed by the security pass.
+
+Temporary work directories include an application marker so stale-cleanup only removes directories that were actually created by `pdf-unredact`. Temporary document data is removed when:
 
 - a document is replaced;
 - the UI closes and the browser permits the cleanup request;
@@ -181,8 +192,13 @@ For unusually large workloads, limits can be adjusted with environment variables
 
 ```text
 PDF_UNREDACT_MAX_UPLOAD_MB
+PDF_UNREDACT_MAX_OUTPUT_MB
+PDF_UNREDACT_MAX_WORKSPACE_MB
+PDF_UNREDACT_MIN_FREE_MB
+PDF_UNREDACT_MAX_ACTIVE_JOBS
 PDF_UNREDACT_MAX_PAGES
 PDF_UNREDACT_MAX_WORKERS
+PDF_UNREDACT_WORKER_MAX_RSS_MB
 PDF_UNREDACT_AUDIT_TIMEOUT
 PDF_UNREDACT_PREVIEW_TIMEOUT
 PDF_UNREDACT_EXPORT_TIMEOUT
@@ -194,7 +210,9 @@ Security limits should only be raised when necessary.
 
 ## CLI
 
-The command-line interface remains fully available for scripted or headless workflows.
+The command-line interface remains fully available for scripted or headless workflows. Since version **1.4.2**, CLI and web operations use an engine-owned private workspace and opaque analysis handles in addition to the shared `EngineClient` validation layer and short-lived PDF worker.
+
+Release builds use `constraints-release.txt` to pin the tested PyMuPDF runtime and Hatchling build backend.
 
 ### Command summary
 
@@ -209,6 +227,7 @@ The command-line interface remains fully available for scripted or headless work
 | `python pdf_unredact.py document.pdf --mode clean --stats` | Export a cleaned PDF and print statistics |
 | `python pdf_unredact.py document.pdf --mode clean --stats-json audit.json` | Export a cleaned PDF and save a JSON report |
 | `python pdf_unredact.py document.pdf --mode clean --remove all-annotations` | Remove every annotation during clean export |
+| `python pdf_unredact.py document.pdf --no-sanitize-active-content` | Export while preserving PDF active content (sanitization is on by default) |
 | `python pdf_unredact.py document.pdf --mode clean -o output.pdf` | Choose an explicit output filename |
 
 ### Basic usage

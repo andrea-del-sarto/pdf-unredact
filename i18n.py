@@ -1,4 +1,5 @@
 import json
+import string
 from functools import lru_cache
 from pathlib import Path
 
@@ -39,6 +40,19 @@ def validate_locales() -> None:
                 if extra:
                     parts.append(f"extra {section} keys: {', '.join(extra)}")
                 raise ValueError(f"Locale {lang}: " + "; ".join(parts))
+
+            formatter = string.Formatter()
+            for key in sorted(expected):
+                def fields(message: str) -> set[str]:
+                    return {name for _, name, _, _ in formatter.parse(message) if name}
+
+                reference_fields = fields(str(reference[section][key]))
+                current_fields = fields(str(current[section][key]))
+                if current_fields != reference_fields:
+                    raise ValueError(
+                        f"Locale {lang}: placeholder mismatch in {section}.{key}: "
+                        f"expected {sorted(reference_fields)}, got {sorted(current_fields)}"
+                    )
 
 
 def translate(key: str, language: str | None = None, section: str = "backend", **values) -> str:

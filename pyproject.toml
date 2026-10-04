@@ -1,6 +1,6 @@
 [project]
 name = "pdf-unredact"
-version = "1.4.0"
+version = "1.4.3"
 description = "Local PDF redaction auditing and recovery tool with native font and layout preservation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,8 +12,8 @@ dependencies = [
 pdf-unredact = "pdf_unredact:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-include = ["pdf_unredact.py", "pdf_worker.py", "web_app.py", "i18n.py", "version.py", "locales/*.json", "static/*"]
+include = ["pdf_unredact.py", "pdf_worker.py", "worker_client.py", "engine_api.py", "web_app.py", "i18n.py", "version.py", "locales/*.json", "static/*"]

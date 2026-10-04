@@ -22,6 +22,7 @@ async function applyLanguage(next){
   const ib=$('infoButton');ib.title=tr('info');ib.setAttribute('aria-label',tr('info'));const ic=$('infoClose');ic.title=tr('close');ic.setAttribute('aria-label',tr('close'));
   $('prev').title=tr('previous_page');$('prev').setAttribute('aria-label',tr('previous_page'));
   $('next').title=tr('next_page');$('next').setAttribute('aria-label',tr('next_page'));
+  updateFullscreenButton();
   $('originalPreview').alt=tr('original_preview');$('cleanPreview').alt=tr('clean_preview');
   updateThemeButton();
   if(currentFilename)$('filemeta').textContent=`${fmt(pages)} ${tr('pages')} · ${human(currentFileSize)}`;
@@ -30,6 +31,27 @@ async function applyLanguage(next){
   if(lastExportStatusKey)$('exportStatus').textContent=tr(lastExportStatusKey);
 }
 $('languageButton').addEventListener('click',async()=>{await applyLanguage(language==='it'?'en':'it')});
+
+function updateFullscreenButton(){
+  const btn=$('fullscreenPreview');
+  if(!btn)return;
+  const active=document.fullscreenElement===$('previewCard');
+  const key=active?'exit_full_screen':'full_screen';
+  const label=tr(key);
+  btn.title=label;
+  btn.setAttribute('aria-label',label);
+  const text=btn.querySelector('span');
+  if(text)text.textContent=label;
+}
+async function togglePreviewFullscreen(){
+  const card=$('previewCard');
+  try{
+    if(document.fullscreenElement===card){await document.exitFullscreen();return}
+    if(document.fullscreenElement)await document.exitFullscreen();
+    if(card.requestFullscreen)await card.requestFullscreen();
+  }catch(err){console.error(err)}
+}
+document.addEventListener('fullscreenchange',updateFullscreenButton);
 function openInfo(){$('infoModal').classList.remove('hidden');$('infoClose').focus()}
 function closeInfo(){$('infoModal').classList.add('hidden');$('infoButton').focus()}
 $('infoButton').addEventListener('click',openInfo);
@@ -56,8 +78,34 @@ function renderFindings(arr){$('findingsSummary').textContent=`${fmt(arr.length)
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function refreshPreview(){if(!job)return;current=Math.max(1,Math.min(pages,parseInt($('page').value)||1));$('page').value=current;const rm=encodeURIComponent(removeMode()),t=Date.now();$('originalPreview').src=`/api/preview/${job}/original/${current}?lang=${language}&t=${t}`;$('cleanPreview').src=`/api/preview/${job}/clean/${current}?remove=${rm}&lang=${language}&t=${t}`}
 async function refreshAudit(){if(!job)return;const btn=$('refreshAudit');btn.disabled=true;try{const r=await fetch(`/api/audit/${job}`,{method:'POST',headers:apiHeaders()});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('analysis_error'));renderStats(d.stats)}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message}finally{btn.disabled=false}}
-async function exportPdf(){if(!job)return;const btn=$('export');btn.disabled=true;lastExportStatusKey='generating';$('exportStatus').textContent=tr('generating');try{const r=await fetch('/api/export',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({job_id:job,mode:outputMode(),remove:removeMode(),filename:$('outputName').value.trim()})});const d=await r.json();if(!r.ok)throw new Error(d.error||tr('export_error'));lastExportStatusKey='pdf_ready';$('exportStatus').textContent=tr('pdf_ready');const link=document.createElement('a');link.href=d.download_url;link.download=d.filename;link.className='hidden';document.body.appendChild(link);link.click();link.remove()}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message}finally{btn.disabled=false}}
-drop.onclick=()=>file.click();file.onchange=()=>upload(file.files[0]);['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>upload(e.dataTransfer.files[0]));$('replace').onclick=()=>file.click();$('prev').onclick=()=>{$('page').value=Math.max(1,current-1);refreshPreview()};$('next').onclick=()=>{$('page').value=Math.min(pages,current+1);refreshPreview()};$('page').onchange=refreshPreview;document.querySelectorAll('input[name="remove"]').forEach(x=>x.onchange=refreshPreview);document.querySelectorAll('input[name="mode"]').forEach(x=>x.onchange=()=>syncOutputName(false));$('outputName').addEventListener('input',()=>{outputNameTouched=true});$('export').onclick=exportPdf;$('refreshAudit').onclick=refreshAudit;
+function requestedPdfName(){let name=$('outputName').value.trim()||outputDefault();if(!/\.pdf$/i.test(name))name+='.pdf';return name}
+async function chooseExportDestination(suggestedName){
+  if(typeof window.showSaveFilePicker!=='function')return null;
+  lastExportStatusKey='choose_save_location';$('exportStatus').textContent=tr('choose_save_location');
+  try{return await window.showSaveFilePicker({suggestedName,types:[{description:tr('pdf_file_type'),accept:{'application/pdf':['.pdf']}}],excludeAcceptAllOption:true})}
+  catch(e){if(e&&e.name==='AbortError')return false;throw e}
+}
+async function saveDownloadToHandle(url,handle){
+  const response=await fetch(url,{cache:'no-store'});
+  if(!response.ok)throw new Error(tr('download_error'));
+  const writable=await handle.createWritable();
+  try{
+    if(response.body&&typeof response.body.pipeTo==='function')await response.body.pipeTo(writable);
+    else{await writable.write(await response.blob());await writable.close()}
+  }catch(e){try{await writable.abort()}catch(_ignored){}throw e}
+}
+async function exportPdf(){if(!job)return;const btn=$('export');btn.disabled=true;let saveHandle=null;try{
+  let requestedName=requestedPdfName();
+  saveHandle=await chooseExportDestination(requestedName);
+  if(saveHandle===false){lastExportStatusKey='save_cancelled';$('exportStatus').textContent=tr('save_cancelled');return}
+  if(saveHandle&&saveHandle.name)requestedName=saveHandle.name;
+  lastExportStatusKey='generating';$('exportStatus').textContent=tr('generating');
+  const r=await fetch('/api/export',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({job_id:job,mode:outputMode(),remove:removeMode(),sanitize_active_content:$('sanitizeActiveContent').checked,filename:requestedName})});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||tr('export_error'));
+  if(saveHandle){await saveDownloadToHandle(d.download_url,saveHandle);lastExportStatusKey='pdf_saved';$('exportStatus').textContent=tr('pdf_saved')}
+  else{lastExportStatusKey='download_started';$('exportStatus').textContent=tr('download_started');const link=document.createElement('a');link.href=d.download_url;link.download=d.filename;link.className='hidden';document.body.appendChild(link);link.click();link.remove()}
+}catch(e){lastExportStatusKey='';$('exportStatus').textContent=e.message||tr('export_error')}finally{btn.disabled=false}}
+drop.onclick=()=>file.click();file.onchange=()=>upload(file.files[0]);['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>upload(e.dataTransfer.files[0]));$('replace').onclick=()=>file.click();$('prev').onclick=()=>{$('page').value=Math.max(1,current-1);refreshPreview()};$('next').onclick=()=>{$('page').value=Math.min(pages,current+1);refreshPreview()};$('fullscreenPreview').onclick=togglePreviewFullscreen;$('page').onchange=refreshPreview;document.querySelectorAll('input[name="remove"]').forEach(x=>x.onchange=refreshPreview);document.querySelectorAll('input[name="mode"]').forEach(x=>x.onchange=()=>syncOutputName(false));$('outputName').addEventListener('input',()=>{outputNameTouched=true});$('export').onclick=exportPdf;$('refreshAudit').onclick=refreshAudit;
 applyLanguage(language).catch(err=>{console.error(err);document.documentElement.lang='en'});
 
 window.addEventListener('pagehide',()=>{if(job)fetch(`/api/job/${job}`,{method:'DELETE',headers:apiHeaders(),keepalive:true}).catch(()=>{});});

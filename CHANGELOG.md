@@ -4,11 +4,64 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - 2026-10-04
+
+### Changed
+- Added a localized full-screen control to the preview toolbar, next to page navigation.
+- Renamed the findings section to “Dettagli rilevamenti” / “Finding details”.
+- Finding details are collapsed by default and can be expanded on demand.
+- Updated Italian and English UI translations for the new controls.
+
+## [1.4.2] - 2026-10-04
+
+### Added
+
+- Added an explicit export setting to enable or disable active-content sanitization. Sanitization remains enabled by default in the web UI, CLI, and engine API.
+- Added post-export fail-closed verification for sanitized PDFs. Requested sanitized exports are rejected and deleted if embedded files, links, automatic actions, JavaScript/Launch-style actions, or other verified action entry points remain.
+- Added opaque engine analysis handles so frontends no longer pass audit JSON paths into the engine API.
+- Added release constraints pinning the tested PyMuPDF runtime and Hatchling build backend.
+
+### Changed
+
+- Enforced `max_pages` inside every worker operation that opens a user PDF: audit, preview, and export.
+- Moved engine temporary directories and audit artifacts fully inside `EngineClient`; public callers no longer supply `work_dir` or `stats_path`.
+- CLI processing now relies entirely on engine-owned temporary storage.
+
+### Security
+
+- Sanitized exports now fail closed if post-save verification cannot prove active-content removal.
+- Analysis handles are bound to input-file metadata so a changed input cannot reuse stale audit findings.
+
+## [1.4.1] - 2026-10-04
+
+### Added
+
+- Added export-time active-content sanitization. Clean and side-by-side PDFs strip JavaScript, active links/actions, embedded/attached files, and interactive response state while explicitly preserving hidden text and redaction content needed by the recovery workflow.
+- Added a frontend-neutral `engine_api.py` security boundary with validated operations for audit, preview, and export. The CLI and web host now use the same API, intended to be reusable by future Tauri or Flutter frontends.
+- Added hard input/output size enforcement inside both the engine API and worker, including a worker file-size ceiling and post-export size validation.
+- Added workspace quotas, free-disk headroom checks, and a bounded number of active web jobs.
+- Added regression tests covering active-content stripping, preservation of recoverable hidden text, input-size enforcement, and authorized output paths.
+
+### Changed
+
+- Reviewed and aligned English/Italian UI terminology, localized the Side-by-side mode label, and removed mixed-language labels from the interface.
+- Locale validation now also verifies format placeholders, preventing runtime formatting errors caused by inconsistent translations.
+- Moved PDF limits and worker invocation details out of the web-specific layer into `EngineLimits` / `EngineClient` so security policy is independent of the current HTTP frontend.
+- CLI export now uses the same active-content sanitization and path/size validation as graphical exports.
+- Worker output limits are derived from the configured engine policy rather than a web-only code path.
+
+### Security
+
+- Exported PDFs are sanitized by default. PyMuPDF `scrub()` is called with `hidden_text=False` and `redactions=False` so the security pass does not destroy recoverable content.
+- Preview and export outputs must remain inside explicitly authorized output roots supplied by the host application.
+- Temporary workspace growth is bounded by `PDF_UNREDACT_MAX_WORKSPACE_MB`, while `PDF_UNREDACT_MIN_FREE_MB` preserves disk headroom before processing.
+
 ## [1.4.0] - 2026-10-02
 
 ### Added
 
 - Added a short-lived isolated PDF worker process for web audits, previews, and exports so untrusted PDF parsing no longer occurs inside the HTTP server process.
+- Added a parent-side resident-memory (RSS) monitor for worker processes on Linux, macOS, and Windows. The default cap is 1536 MB and is configurable with `PDF_UNREDACT_WORKER_MAX_RSS_MB`; `0` disables it.
 - Added worker execution timeouts, bounded PDF-processing concurrency, page-count and preview-pixel limits, and best-effort CPU, file-size, file-descriptor, and Linux address-space limits.
 - Added a random per-launch session secret. The initial local URL includes the secret once, the server exchanges it for an HttpOnly `SameSite=Strict` session cookie, and the frontend removes the token from the visible URL after startup.
 - Added Host and same-origin validation for local API requests to reduce localhost / DNS-rebinding and cross-origin request exposure.
@@ -19,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- CLI audit and export operations now use the same short-lived PDF worker as the web interface instead of parsing untrusted PDFs directly in the main CLI process.
+- Worker subprocesses now inherit a narrower environment and no longer inherit `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `PYTHONPATH`, or `PYTHONHOME`.
 - Uploads are now streamed to a private temporary file in chunks instead of being read completely into memory before analysis.
 - The default web upload limit is now 250 MB and can be overridden with `PDF_UNREDACT_MAX_UPLOAD_MB`; JSON request bodies are separately size-limited.
 - Browser-facing failures now return generic localized messages while technical details stay in local logs; set `PDF_UNREDACT_DEBUG=1` for verbose worker diagnostics.
@@ -33,6 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Prevented concurrent operations on the same job from racing while rewriting or deleting temporary files.
 - Prevented raw parser exceptions and local filesystem details from being returned directly to the web interface.
 - Hardened temporary file permissions on supported platforms and cleanup behavior after normal shutdown, signals, document replacement, and later restarts after an unclean exit.
+- Stale temporary cleanup now requires an application-owned marker file before removing a directory, reducing the chance of deleting an unrelated temporary directory that only shares the same prefix.
 
 ### Fixed
 - Fixed worker startup for source installations where PyMuPDF is installed in the same interpreter's user-site packages. The web worker no longer uses Python isolated mode (`-I`) or suppresses the user-site while still receiving a strict allow-listed environment with `PYTHONPATH` / `PYTHONHOME` excluded.

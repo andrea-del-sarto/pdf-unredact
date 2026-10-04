@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Tuple
@@ -249,6 +250,7 @@ class CleanResult:
     rewrite_attempts: int = 0
     rewrite_successes: int = 0
     rewrite_failures: int = 0
+    active_content_sanitized: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -761,6 +763,12 @@ def _rewrite_dark_rectangles(doc, findings: List[RedactionCandidate], page_numbe
     return removed, attempts, failures
 
 
+def _stats_from_dict(data: dict) -> RedactionStats:
+    payload = dict(data)
+    payload["findings"] = [_candidate_from_dict(item) for item in payload.get("findings", [])]
+    return RedactionStats(**payload)
+
+
 def _candidate_from_dict(data: dict) -> RedactionCandidate:
     return RedactionCandidate(
         page=int(data["page"]),
@@ -915,8 +923,132 @@ def _remove_annotations(doc, mode: str = "redactions", page_numbers=None) -> int
     return removed
 
 
-def _validate_saved_pdf(path: str, expected_pages: int | None = None) -> None:
-    """Fail fast if an exported PDF cannot be reopened or lost pages."""
+def _clear_pdf_action_keys(doc) -> None:
+    """Clear action entry points that are not fully covered by PyMuPDF scrub()."""
+    targets = []
+    catalog = doc.pdf_catalog()
+    if catalog:
+        targets.append((catalog, ("OpenAction", "AA")))
+    for page in doc:
+        if page.xref:
+            targets.append((page.xref, ("AA",)))
+        for annot in page.annots() or []:
+            if annot.xref:
+                targets.append((annot.xref, ("A", "AA")))
+        for widget in page.widgets() or []:
+            if widget.xref:
+                targets.append((widget.xref, ("A", "AA")))
+    for xref, keys in targets:
+        for key in keys:
+            try:
+                kind, _ = doc.xref_get_key(xref, key)
+                if kind != "null":
+                    doc.xref_set_key(xref, key, "null")
+            except Exception:
+                # Some malformed objects cannot be rewritten through the high-level
+                # API.  The subsequent scrub/save validation still runs; callers
+                # treat export failures as fatal rather than returning a partial file.
+                pass
+
+
+def _sanitize_active_content(doc) -> None:
+    """Remove active / attached content without destroying recoverable hidden text.
+
+    PyMuPDF's scrub defaults deliberately remove hidden text and redactions,
+    which is unsuitable for an unredaction tool. Keep those two classes while
+    stripping JavaScript, attachments / embedded files, links / actions and
+    interactive-form responses that should not survive a security-oriented export.
+    """
+    _clear_pdf_action_keys(doc)
+    doc.scrub(
+        attached_files=True,
+        clean_pages=True,
+        embedded_files=True,
+        hidden_text=False,
+        javascript=True,
+        metadata=False,
+        redactions=False,
+        redact_images=0,
+        remove_links=True,
+        reset_fields=True,
+        reset_responses=True,
+        thumbnails=False,
+        xml_metadata=False,
+    )
+    _clear_pdf_action_keys(doc)
+
+
+class SecuritySanitizationError(RuntimeError):
+    """Raised when active PDF content survives a requested sanitized export."""
+
+
+def _key_is_present(doc, xref: int, key: str) -> bool:
+    try:
+        kind, value = doc.xref_get_key(xref, key)
+        return kind != "null" and str(value).strip() not in {"", "null"}
+    except Exception:
+        # Verification is fail-closed: an object we cannot inspect is not
+        # considered proven safe when sanitization was explicitly requested.
+        raise SecuritySanitizationError(f"unable to verify PDF action key: {key}")
+
+
+def _verify_no_active_content(path: str) -> None:
+    """Re-open a saved PDF and prove that common active-content entry points are absent."""
+    check = pymupdf.open(path)
+    try:
+        if check.embfile_count() != 0:
+            raise SecuritySanitizationError("embedded files remain after sanitization")
+
+        catalog = check.pdf_catalog()
+        if catalog:
+            for key in ("OpenAction", "AA"):
+                if _key_is_present(check, catalog, key):
+                    raise SecuritySanitizationError(f"catalog {key} remains after sanitization")
+
+        for page in check:
+            if page.get_links():
+                raise SecuritySanitizationError("active links remain after sanitization")
+            if page.xref and _key_is_present(check, page.xref, "AA"):
+                raise SecuritySanitizationError("page additional action remains after sanitization")
+            for annot in page.annots() or []:
+                if annot.xref:
+                    for key in ("A", "AA"):
+                        if _key_is_present(check, annot.xref, key):
+                            raise SecuritySanitizationError("annotation action remains after sanitization")
+            for widget in page.widgets() or []:
+                if widget.xref:
+                    for key in ("A", "AA"):
+                        if _key_is_present(check, widget.xref, key):
+                            raise SecuritySanitizationError("form action remains after sanitization")
+
+        # After garbage=4, unreachable objects are discarded. Scan remaining
+        # dictionaries for executable action types that may not be surfaced by
+        # a high-level API. xref_object() does not include stream payload bytes.
+        dangerous_markers = (
+            "/S/JavaScript", "/S /JavaScript",
+            "/S/Launch", "/S /Launch",
+            "/S/SubmitForm", "/S /SubmitForm",
+            "/S/ImportData", "/S /ImportData",
+        )
+        for xref in range(1, check.xref_length()):
+            try:
+                obj = check.xref_object(xref, compressed=True)
+            except Exception as exc:
+                raise SecuritySanitizationError("unable to verify exported PDF objects") from exc
+            compact = " ".join(str(obj).split())
+            if any(marker in compact for marker in dangerous_markers):
+                raise SecuritySanitizationError("executable PDF action remains after sanitization")
+    finally:
+        check.close()
+
+
+def _validate_saved_pdf(
+    path: str,
+    expected_pages: int | None = None,
+    *,
+    require_sanitized: bool = False,
+) -> None:
+    """Fail fast if an exported PDF is invalid or requested sanitization is incomplete."""
     check = pymupdf.open(path)
     try:
         if check.page_count <= 0:
@@ -927,28 +1059,55 @@ def _validate_saved_pdf(path: str, expected_pages: int | None = None) -> None:
             )
     finally:
         check.close()
+    if require_sanitized:
+        _verify_no_active_content(path)
 
 
-def make_clean_pdf(input_pdf: str, output_pdf: str, remove: str = "redactions") -> CleanResult:
+def make_clean_pdf(
+    input_pdf: str,
+    output_pdf: str,
+    remove: str = "redactions",
+    *,
+    sanitize_active_content: bool = True,
+) -> CleanResult:
     stats = compute_redaction_stats(input_pdf)
     doc = pymupdf.open(input_pdf)
     try:
         result = _clean_document(doc, stats.findings, remove=remove)
+        if sanitize_active_content:
+            _sanitize_active_content(doc)
+            result.active_content_sanitized = True
         expected_pages = doc.page_count
         doc.save(output_pdf, garbage=4, deflate=True)
-        _validate_saved_pdf(output_pdf, expected_pages=expected_pages)
+        try:
+            _validate_saved_pdf(
+                output_pdf, expected_pages=expected_pages,
+                require_sanitized=sanitize_active_content,
+            )
+        except Exception:
+            Path(output_pdf).unlink(missing_ok=True)
+            raise
         return result
     finally:
         doc.close()
 
 
-def make_side_by_side(input_pdf: str, output_pdf: str, remove: str = "redactions") -> CleanResult:
+def make_side_by_side(
+    input_pdf: str,
+    output_pdf: str,
+    remove: str = "redactions",
+    *,
+    sanitize_active_content: bool = True,
+) -> CleanResult:
     stats = compute_redaction_stats(input_pdf)
     src = pymupdf.open(input_pdf)
     clean = pymupdf.open(input_pdf)
     out = pymupdf.open()
     try:
         result = _clean_document(clean, stats.findings, remove=remove)
+        if sanitize_active_content:
+            _sanitize_active_content(clean)
+            result.active_content_sanitized = True
         for page_number in range(src.page_count):
             src_page = src[page_number]
             rect = src_page.rect
@@ -971,8 +1130,17 @@ def make_side_by_side(input_pdf: str, output_pdf: str, remove: str = "redactions
                 overlay=True,
             )
         expected_pages = out.page_count
+        if sanitize_active_content:
+            _sanitize_active_content(out)
         out.save(output_pdf, garbage=4, deflate=True)
-        _validate_saved_pdf(output_pdf, expected_pages=expected_pages)
+        try:
+            _validate_saved_pdf(
+                output_pdf, expected_pages=expected_pages,
+                require_sanitized=sanitize_active_content,
+            )
+        except Exception:
+            Path(output_pdf).unlink(missing_ok=True)
+            raise
         return result
     finally:
         out.close()
@@ -1003,6 +1171,16 @@ def main() -> None:
     ap.add_argument("--web", action="store_true", help="Start the private local web interface")
     ap.add_argument("--port", type=int, default=8765, help="Preferred local web port (default: 8765; falls back automatically if busy)")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser automatically")
+    sanitize_group = ap.add_mutually_exclusive_group()
+    sanitize_group.add_argument(
+        "--sanitize-active-content", dest="sanitize_active_content", action="store_true",
+        help="Remove PDF active content during export (default)",
+    )
+    sanitize_group.add_argument(
+        "--no-sanitize-active-content", dest="sanitize_active_content", action="store_false",
+        help="Preserve PDF active content during export",
+    )
+    ap.set_defaults(sanitize_active_content=True)
     args = ap.parse_args()
 
     if args.web:
@@ -1029,21 +1207,36 @@ def main() -> None:
         ap.error("output PDF must be different from input PDF")
 
     ensure_parent_dir(args.output)
-    if args.mode == "side_by_side":
-        make_side_by_side(args.input_pdf, args.output, remove=args.remove)
-    else:
-        make_clean_pdf(args.input_pdf, args.output, remove=args.remove)
-    print(f"Wrote: {args.output}")
 
-    if args.stats or args.stats_json:
-        stats = compute_redaction_stats(args.input_pdf)
-        if args.stats:
-            print(stats.display())
-        if args.stats_json:
-            ensure_parent_dir(args.stats_json)
-            with open(args.stats_json, "w", encoding="utf-8") as f:
-                f.write(stats.to_json())
-            print(f"Stats written to: {args.stats_json}")
+    # Route CLI processing through the same validated engine API used by the
+    # web host. A future Tauri / Flutter shell can reuse this boundary directly.
+    from engine_api import EngineClient
+
+    engine = EngineClient()
+    try:
+        engine.export(
+            input_path=args.input_pdf,
+            output_path=args.output,
+            mode=args.mode,
+            remove=args.remove,
+            authorized_output_roots=[Path(args.output).resolve().parent],
+            sanitize_active_content=args.sanitize_active_content,
+        )
+        print(f"Wrote: {args.output}")
+
+        if args.stats or args.stats_json:
+            analysis = engine.audit(args.input_pdf)
+            stats = _stats_from_dict(analysis.stats)
+            if args.stats:
+                print(stats.display())
+            if args.stats_json:
+                ensure_parent_dir(args.stats_json)
+                with open(args.stats_json, "w", encoding="utf-8") as f:
+                    f.write(stats.to_json())
+                print(f"Stats written to: {args.stats_json}")
+            engine.close_analysis(analysis.analysis_id)
+    finally:
+        engine.close()
 
 
 if __name__ == "__main__":

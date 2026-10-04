@@ -22,6 +22,7 @@ from pathlib import Path
 
 from i18n import frontend_catalog, normalize_language, translate
 from version import __version__
+from engine_api import EngineClient, EngineLimits, directory_size, ensure_free_space
 
 
 def _system_language():
@@ -33,36 +34,50 @@ def _system_language():
 
 HOST = "127.0.0.1"
 APP_REPOSITORY = os.environ.get("PDF_UNREDACT_REPOSITORY", "https://github.com/andrea-del-sarto/pdf-unredact")
-MAX_UPLOAD_BYTES = int(os.environ.get("PDF_UNREDACT_MAX_UPLOAD_MB", "250")) * 1024 * 1024
+ENGINE_LIMITS = EngineLimits.from_env()
+MAX_UPLOAD_BYTES = ENGINE_LIMITS.max_input_bytes
 MAX_JSON_BYTES = 64 * 1024
-MAX_RESULT_JSON_BYTES = 32 * 1024 * 1024
-MAX_PAGES = int(os.environ.get("PDF_UNREDACT_MAX_PAGES", "2000"))
-MAX_PREVIEW_PIXELS = int(os.environ.get("PDF_UNREDACT_MAX_PREVIEW_PIXELS", "25000000"))
+MAX_RESULT_JSON_BYTES = ENGINE_LIMITS.max_result_bytes
+MAX_PAGES = ENGINE_LIMITS.max_pages
+MAX_PREVIEW_PIXELS = ENGINE_LIMITS.max_preview_pixels
 JOB_TTL_SECONDS = int(os.environ.get("PDF_UNREDACT_JOB_TTL_SECONDS", str(2 * 60 * 60)))
-WORKER_TIMEOUT_AUDIT = int(os.environ.get("PDF_UNREDACT_AUDIT_TIMEOUT", "120"))
-WORKER_TIMEOUT_PREVIEW = int(os.environ.get("PDF_UNREDACT_PREVIEW_TIMEOUT", "30"))
-WORKER_TIMEOUT_EXPORT = int(os.environ.get("PDF_UNREDACT_EXPORT_TIMEOUT", "240"))
 MAX_CONCURRENT_PDF_TASKS = max(1, int(os.environ.get("PDF_UNREDACT_MAX_WORKERS", "2")))
+MAX_ACTIVE_JOBS = max(1, int(os.environ.get("PDF_UNREDACT_MAX_ACTIVE_JOBS", "16")))
+MAX_WORKSPACE_BYTES = max(MAX_UPLOAD_BYTES, int(os.environ.get("PDF_UNREDACT_MAX_WORKSPACE_MB", "2048")) * 1024 * 1024)
 DEBUG = os.environ.get("PDF_UNREDACT_DEBUG", "").lower() in {"1", "true", "yes"}
 SESSION_TOKEN = secrets.token_urlsafe(32)
 COOKIE_NAME = "pdf_unredact_session"
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 WORKER_PATH = BASE_DIR / "pdf_worker.py"
+TEMP_MARKER = ".pdf-unredact-workdir"
 WORK_ROOT = Path(tempfile.mkdtemp(prefix="pdf-unredact-"))
 try:
     os.chmod(WORK_ROOT, 0o700)
 except OSError:
     pass
+try:
+    (WORK_ROOT / TEMP_MARKER).write_text("pdf-unredact\n", encoding="ascii")
+except OSError:
+    pass
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.RLock()
 PDF_TASKS = threading.BoundedSemaphore(MAX_CONCURRENT_PDF_TASKS)
+WORKSPACE_LOCK = threading.RLock()
+WORKSPACE_RESERVED_BYTES = 0
+WORKSPACE_RESERVED_JOBS = 0
 BROWSER_PROFILES: set[str] = set()
 BROWSER_PROFILES_LOCK = threading.Lock()
 SHUTTING_DOWN = False
 
 logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, format="[%(levelname)s] %(message)s")
 LOG = logging.getLogger("pdf-unredact")
+ENGINE = EngineClient(
+    limits=ENGINE_LIMITS,
+    concurrency_guard=PDF_TASKS,
+    log_debug=(lambda msg: LOG.debug("worker stderr: %s", msg)) if DEBUG else None,
+    log_error=lambda msg: LOG.error("%s", msg),
+)
 
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#17191c"/><text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="white">PU</text></svg>'
 
@@ -112,6 +127,8 @@ def _cleanup_stale_temp(prefix: str, older_than: int = 24 * 60 * 60) -> None:
         try:
             if entry.resolve() == WORK_ROOT.resolve() or not entry.is_dir() or now - entry.stat().st_mtime < older_than:
                 continue
+            if not (entry / TEMP_MARKER).is_file():
+                continue
             shutil.rmtree(entry, ignore_errors=True)
         except OSError:
             pass
@@ -126,6 +143,7 @@ def _cleanup_all() -> None:
         metas = list(JOBS.values())
         JOBS.clear()
     for meta in metas:
+        ENGINE.close_analysis(meta.get("analysis_id"))
         shutil.rmtree(meta.get("dir", ""), ignore_errors=True)
     shutil.rmtree(WORK_ROOT, ignore_errors=True)
     with BROWSER_PROFILES_LOCK:
@@ -133,6 +151,7 @@ def _cleanup_all() -> None:
         BROWSER_PROFILES.clear()
     for profile in profiles:
         shutil.rmtree(profile, ignore_errors=True)
+    ENGINE.close()
 
 
 atexit.register(_cleanup_all)
@@ -155,6 +174,7 @@ def _cleanup_old_jobs():
             finally:
                 lock.release()
     for meta in expired:
+        ENGINE.close_analysis(meta.get("analysis_id"))
         shutil.rmtree(meta["dir"], ignore_errors=True)
 
 
@@ -166,100 +186,68 @@ def _job(job_id):
         return JOBS.get(job_id)
 
 
-def _write_stats_file(meta: dict) -> None:
-    path = Path(meta["dir"]) / "audit.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(meta["stats"], ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
-def _worker_env() -> dict[str, str]:
-    keep = {"PATH", "SYSTEMROOT", "WINDIR", "HOME", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"}
-    env = {k: v for k, v in os.environ.items() if k in keep}
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PDF_UNREDACT_WORKER_CPU_SECONDS"] = os.environ.get("PDF_UNREDACT_WORKER_CPU_SECONDS", "180")
-    env["PDF_UNREDACT_WORKER_MEMORY_MB"] = os.environ.get("PDF_UNREDACT_WORKER_MEMORY_MB", "0")
-    env["PDF_UNREDACT_WORKER_FILE_MB"] = os.environ.get("PDF_UNREDACT_WORKER_FILE_MB", "2048")
-    env["PDF_UNREDACT_WORKER_NOFILE"] = os.environ.get("PDF_UNREDACT_WORKER_NOFILE", "256")
-    return env
-
-
-def _run_worker(args: list[str], result_path: Path, timeout: int) -> dict:
-    if not WORKER_PATH.is_file():
-        raise RuntimeError("PDF worker is unavailable")
-    result_path.unlink(missing_ok=True)
-    # Use the same interpreter environment as the parent process. The environment
-    # is already allow-listed above, so PYTHONPATH/PYTHONHOME are not inherited.
-    # Do not use Python -I / -s here: many Linux source installs legitimately
-    # provide PyMuPDF from the interpreter user-site, and hiding it makes the
-    # worker fail even though the main application can import it.
-    cmd = [sys.executable, str(WORKER_PATH), *args, "--result", str(result_path)]
-    LOG.debug("worker command: %r", cmd)
-    with PDF_TASKS:
-        try:
-            completed = subprocess.run(cmd, cwd=str(BASE_DIR), env=_worker_env(), stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                timeout=timeout, check=False, start_new_session=(os.name != "nt"),
-                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0))
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("PDF worker timed out") from exc
-    stderr_text = completed.stderr.decode("utf-8", "replace")[-8000:] if completed.stderr else ""
-    if DEBUG and stderr_text:
-        LOG.debug("worker stderr: %s", stderr_text)
-    if not result_path.exists():
-        if completed.returncode < 0:
-            LOG.error("PDF worker terminated by signal %s", -completed.returncode)
-        else:
-            LOG.error("PDF worker exited without a result (exit %s)%s", completed.returncode, f": {stderr_text}" if DEBUG and stderr_text else "")
-        raise RuntimeError("PDF worker did not start or terminated unexpectedly")
-    if result_path.stat().st_size > MAX_RESULT_JSON_BYTES:
-        raise RuntimeError("PDF worker result is too large")
-    data = json.loads(result_path.read_text(encoding="utf-8"))
-    if not data.get("ok"):
-        LOG.warning("PDF worker error: %s: %s", data.get("error_type"), data.get("error"))
-        raise RuntimeError(data.get("error") or "PDF worker failed")
-    return data
-
-
 def _probe_worker() -> None:
-    result_path = WORK_ROOT / "worker-probe.json"
-    try:
-        _run_worker(["probe"], result_path, min(20, WORKER_TIMEOUT_PREVIEW))
-    finally:
-        result_path.unlink(missing_ok=True)
+    ENGINE.probe()
 
 
-def _audit_pdf(input_path: str, job_dir: str) -> tuple[int, dict]:
-    result_path = Path(job_dir) / "audit-result.json"
-    data = _run_worker(["audit", "--input", input_path, "--max-pages", str(MAX_PAGES)], result_path, WORKER_TIMEOUT_AUDIT)
-    result_path.unlink(missing_ok=True)
-    return int(data["pages"]), data["stats"]
+def _audit_pdf(input_path: str) -> tuple[int, dict, str]:
+    analysis = ENGINE.audit(input_path)
+    return analysis.pages, analysis.stats, analysis.analysis_id
 
 
 def _render_preview_worker(meta: dict, page_number: int, kind: str, remove_mode: str) -> Path:
     token = uuid.uuid4().hex
     output = Path(meta["dir"]) / f"preview-{token}.png"
-    result = Path(meta["dir"]) / f"preview-{token}.json"
-    stats_path = Path(meta["dir"]) / "audit.json"
-    _run_worker(["preview", "--input", meta["input"], "--output", str(output), "--stats", str(stats_path),
-        "--page", str(page_number), "--kind", kind, "--remove", remove_mode,
-        "--max-pixels", str(MAX_PREVIEW_PIXELS)], result, WORKER_TIMEOUT_PREVIEW)
-    result.unlink(missing_ok=True)
-    if not output.is_file() or not _is_within(output, meta["dir"]):
-        raise RuntimeError("preview was not generated")
-    return output
+    return ENGINE.preview(
+        input_path=meta["input"],
+        analysis_id=meta["analysis_id"],
+        output_path=output,
+        page=page_number,
+        kind=kind,
+        remove=remove_mode,
+        authorized_output_roots=[meta["dir"]],
+    )
 
 
-def _export_pdf_worker(meta: dict, output: str, mode: str, remove: str) -> dict:
-    result = Path(meta["dir"]) / f"export-{uuid.uuid4().hex}.json"
-    data = _run_worker(["export", "--input", meta["input"], "--output", output, "--mode", mode, "--remove", remove], result, WORKER_TIMEOUT_EXPORT)
-    result.unlink(missing_ok=True)
-    return data["clean_result"]
+def _export_pdf_worker(
+    meta: dict, output: str, mode: str, remove: str, sanitize_active_content: bool
+) -> dict:
+    return ENGINE.export(
+        input_path=meta["input"],
+        output_path=output,
+        mode=mode,
+        remove=remove,
+        authorized_output_roots=[meta["dir"]],
+        sanitize_active_content=sanitize_active_content,
+    )
 
+def _workspace_reserve(bytes_needed: int, *, reserve_job: bool = False) -> None:
+    global WORKSPACE_RESERVED_BYTES, WORKSPACE_RESERVED_JOBS
+    requested = max(0, int(bytes_needed))
+    _cleanup_old_jobs()
+    with WORKSPACE_LOCK, JOBS_LOCK:
+        if reserve_job and len(JOBS) + WORKSPACE_RESERVED_JOBS >= MAX_ACTIVE_JOBS:
+            raise RuntimeError("too many active PDF jobs")
+        used = directory_size(WORK_ROOT)
+        if used + WORKSPACE_RESERVED_BYTES + requested > MAX_WORKSPACE_BYTES:
+            raise RuntimeError("PDF workspace quota exceeded")
+        ensure_free_space(WORK_ROOT, requested, min_free_bytes=ENGINE_LIMITS.min_free_bytes)
+        WORKSPACE_RESERVED_BYTES += requested
+        if reserve_job:
+            WORKSPACE_RESERVED_JOBS += 1
+
+
+def _workspace_release(bytes_reserved: int, *, reserved_job: bool = False) -> None:
+    global WORKSPACE_RESERVED_BYTES, WORKSPACE_RESERVED_JOBS
+    with WORKSPACE_LOCK:
+        WORKSPACE_RESERVED_BYTES = max(0, WORKSPACE_RESERVED_BYTES - max(0, int(bytes_reserved)))
+        if reserved_job:
+            WORKSPACE_RESERVED_JOBS = max(0, WORKSPACE_RESERVED_JOBS - 1)
+
+
+def _export_reservation(meta: dict) -> int:
+    input_size = Path(meta["input"]).stat().st_size
+    return min(ENGINE_LIMITS.max_output_bytes, max(64 * 1024 * 1024, input_size * 3))
 
 def _same_host_value(host: str, port: int) -> bool:
     host = (host or "").strip().lower()
@@ -383,7 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             supplied = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
             if not self._session_cookie_ok() and not (supplied and hmac.compare_digest(supplied, SESSION_TOKEN)):
                 self._send(403, b"Forbidden"); return
-            html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace("__APP_VERSION__", __version__).replace("__APP_REPOSITORY__", APP_REPOSITORY)
+            initial_lang = normalize_language(self.headers.get("Accept-Language"))
+            html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace("__APP_VERSION__", __version__).replace("__APP_REPOSITORY__", APP_REPOSITORY).replace("__HTML_LANG__", initial_lang)
             self._send(200, html.encode(), "text/html; charset=utf-8", {"Set-Cookie": f"{COOKIE_NAME}={SESSION_TOKEN}; Path=/; HttpOnly; SameSite=Strict"}); return
         if path == "/favicon.ico":
             if not self._request_allowed(): return
@@ -439,7 +428,10 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0: self._json(400, {"error": _message("empty_file", lang)}); return
             if length > MAX_UPLOAD_BYTES: self._json(413, {"error": _message("too_large", lang).format(limit_mb=MAX_UPLOAD_BYTES // 1024 // 1024)}); return
             filename = _safe_filename(urllib.parse.unquote(self.headers.get("X-Filename", "document.pdf"))); job_id = uuid.uuid4().hex
+            reserved = 0
+            analysis_id = None
             try:
+                _workspace_reserve(length, reserve_job=True); reserved = length
                 job_dir = _secure_job_dir(job_id); input_path = job_dir / "input.pdf"; remaining = length; first = b""
                 with input_path.open("xb") as f:
                     try: os.chmod(input_path, 0o600)
@@ -450,12 +442,14 @@ class Handler(BaseHTTPRequestHandler):
                         if len(first) < 5: first += chunk[:5-len(first)]
                         f.write(chunk); remaining -= len(chunk)
                 if first != b"%PDF-": raise ValueError("invalid PDF signature")
-                pages, stats = _audit_pdf(str(input_path), str(job_dir))
-                meta = {"dir": str(job_dir), "input": str(input_path), "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "lock": threading.RLock()}
-                _write_stats_file(meta)
+                pages, stats, analysis_id = _audit_pdf(str(input_path))
+                meta = {"dir": str(job_dir), "input": str(input_path), "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "analysis_id": analysis_id, "lock": threading.RLock()}
                 with JOBS_LOCK: JOBS[job_id] = meta
+                _workspace_release(reserved, reserved_job=True); reserved = 0
                 self._json(200, {"job_id": job_id, "filename": filename, "pages": pages, "stats": stats})
             except Exception as exc:
+                _workspace_release(reserved, reserved_job=True)
+                ENGINE.close_analysis(analysis_id)
                 shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True); self._safe_failure(exc, lang, "cannot_analyze")
             return
         if parsed.path.startswith("/api/audit/"):
@@ -463,9 +457,14 @@ class Handler(BaseHTTPRequestHandler):
             if not meta: self._json(404, {"error": _message("job_not_found", self._lang(parsed))}); return
             try:
                 with meta["lock"]:
-                    pages, stats = _audit_pdf(meta["input"], meta["dir"])
-                    if pages != meta["pages"]: raise RuntimeError("page count changed")
-                    meta["stats"] = stats; _write_stats_file(meta)
+                    old_analysis_id = meta.get("analysis_id")
+                    pages, stats, analysis_id = _audit_pdf(meta["input"])
+                    if pages != meta["pages"]:
+                        ENGINE.close_analysis(analysis_id)
+                        raise RuntimeError("page count changed")
+                    meta["stats"] = stats
+                    meta["analysis_id"] = analysis_id
+                    ENGINE.close_analysis(old_analysis_id)
                 self._json(200, {"stats": stats})
             except Exception as exc: self._safe_failure(exc, self._lang(parsed))
             return
@@ -473,19 +472,26 @@ class Handler(BaseHTTPRequestHandler):
             lang = self._lang(parsed)
             try:
                 data = self._read_json_body(); job_id = str(data.get("job_id", "")); mode = data.get("mode", "clean"); remove = data.get("remove", "redactions")
+                sanitize_active_content = data.get("sanitize_active_content", True)
                 if mode not in {"clean", "side_by_side"}: raise ValueError("invalid mode")
                 if remove not in {"redactions", "all-annotations"}: raise ValueError("invalid annotation option")
+                if not isinstance(sanitize_active_content, bool): raise ValueError("invalid sanitization option")
                 meta = _job(job_id)
                 if not meta: self._json(404, {"error": _message("job_not_found", lang)}); return
                 stem = Path(meta["filename"]).stem; requested_name = str(data.get("filename", "")).strip()
                 output_name = _safe_filename(requested_name) if requested_name else stem + ("_clean.pdf" if mode == "clean" else "_side_by_side.pdf")
                 output = Path(meta["dir"]) / output_name
                 if not _is_within(output, meta["dir"]): raise ValueError("invalid output path")
-                with meta["lock"]:
-                    output.unlink(missing_ok=True)
-                    result = _export_pdf_worker(meta, str(output), mode, remove)
-                    if not output.is_file(): raise RuntimeError("output file missing")
-                    meta["last_output"] = str(output)
+                export_reserve = _export_reservation(meta)
+                _workspace_reserve(export_reserve)
+                try:
+                    with meta["lock"]:
+                        output.unlink(missing_ok=True)
+                        result = _export_pdf_worker(meta, str(output), mode, remove, sanitize_active_content)
+                        if not output.is_file(): raise RuntimeError("output file missing")
+                        meta["last_output"] = str(output)
+                finally:
+                    _workspace_release(export_reserve)
                 self._json(200, {"filename": output.name, "download_url": f"/api/download/{job_id}", "clean_result": result})
             except Exception as exc: self._safe_failure(exc, lang)
             return
@@ -507,6 +513,7 @@ class Handler(BaseHTTPRequestHandler):
             with JOBS_LOCK:
                 removed = JOBS.pop(job_id, None)
             if removed:
+                ENGINE.close_analysis(removed.get("analysis_id"))
                 shutil.rmtree(removed["dir"], ignore_errors=True)
         self._send(204)
 
@@ -694,6 +701,8 @@ def _browser_launch_args(candidate: dict, url: str, profile_dir: str) -> list[st
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-sync",
+            "--disable-translate",
+            "--disable-features=Translate,TranslateUI",
         ]
 
     if family == "firefox":
@@ -736,6 +745,10 @@ def _open_sandbox_browser(url: str) -> str | None:
         return None
     for candidate in _sandbox_browser_candidates():
         profile_dir = tempfile.mkdtemp(prefix="pdf-unredact-browser-")
+        try:
+            Path(profile_dir, TEMP_MARKER).write_text("pdf-unredact-browser\n", encoding="ascii")
+        except OSError:
+            pass
         try:
             os.chmod(profile_dir, 0o700)
         except OSError:

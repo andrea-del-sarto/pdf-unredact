@@ -1,8 +1,8 @@
 """Isolated PDF worker for the local web UI.
 
-The web server never parses untrusted PDF data directly. Each audit, preview,
-and export is delegated to a short-lived subprocess with best-effort resource
-limits. The CLI remains available through pdf_unredact.py.
+The web host and CLI do not parse untrusted PDF data directly. Audit, preview,
+and export operations are delegated to a short-lived subprocess with best-effort
+resource limits and parent-side RSS monitoring.
 """
 from __future__ import annotations
 
@@ -107,8 +107,32 @@ except BaseException as exc:
     raise SystemExit(3)
 
 
+def _validate_input_file(path: str, max_bytes: int) -> Path:
+    target = Path(path).resolve()
+    if not target.is_file():
+        raise ValueError("input PDF does not exist or is not a regular file")
+    size = target.stat().st_size
+    if size <= 0 or (max_bytes and size > max_bytes):
+        raise ValueError("input PDF exceeds the configured size limit")
+    with target.open("rb") as fh:
+        if fh.read(5) != b"%PDF-":
+            raise ValueError("input is not a PDF file")
+    return target
+
+
+def _validate_output_file(path: str, max_bytes: int) -> Path:
+    target = Path(path).resolve()
+    if not target.is_file():
+        raise RuntimeError("worker output was not generated")
+    if max_bytes and target.stat().st_size > max_bytes:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("worker output exceeds the configured size limit")
+    return target
+
+
 def cmd_audit(args) -> None:
-    doc = pymupdf.open(args.input)
+    input_path = _validate_input_file(args.input, args.max_input_bytes)
+    doc = pymupdf.open(input_path)
     try:
         if doc.needs_pass:
             raise ValueError("password-protected PDF")
@@ -119,14 +143,27 @@ def cmd_audit(args) -> None:
             raise ValueError(f"PDF has too many pages ({pages} > {args.max_pages})")
     finally:
         doc.close()
-    stats = compute_redaction_stats(args.input)
+    stats = compute_redaction_stats(str(input_path))
     _write_json(args.result, {"ok": True, "pages": pages, "stats": stats.to_dict()})
 
 
+def _validate_page_count(doc, max_pages: int) -> int:
+    if doc.needs_pass:
+        raise ValueError("password-protected PDF")
+    pages = doc.page_count
+    if pages <= 0:
+        raise ValueError("PDF contains no pages")
+    if max_pages and pages > max_pages:
+        raise ValueError(f"PDF has too many pages ({pages} > {max_pages})")
+    return pages
+
+
 def cmd_preview(args) -> None:
-    doc = pymupdf.open(args.input)
+    input_path = _validate_input_file(args.input, args.max_input_bytes)
+    doc = pymupdf.open(input_path)
     try:
-        if args.page < 1 or args.page > doc.page_count:
+        pages = _validate_page_count(doc, args.max_pages)
+        if args.page < 1 or args.page > pages:
             raise ValueError("invalid page")
         if args.kind == "clean":
             stats_dict = json.loads(Path(args.stats).read_text(encoding="utf-8"))
@@ -153,10 +190,24 @@ def cmd_probe(args) -> None:
 
 
 def cmd_export(args) -> None:
+    input_path = _validate_input_file(args.input, args.max_input_bytes)
+    probe = pymupdf.open(input_path)
+    try:
+        _validate_page_count(probe, args.max_pages)
+    finally:
+        probe.close()
+    sanitize = bool(args.sanitize_active_content)
     if args.mode == "clean":
-        result = make_clean_pdf(args.input, args.output, remove=args.remove)
+        result = make_clean_pdf(
+            str(input_path), args.output, remove=args.remove,
+            sanitize_active_content=sanitize,
+        )
     else:
-        result = make_side_by_side(args.input, args.output, remove=args.remove)
+        result = make_side_by_side(
+            str(input_path), args.output, remove=args.remove,
+            sanitize_active_content=sanitize,
+        )
+    _validate_output_file(args.output, args.max_output_bytes)
     _write_json(args.result, {"ok": True, "clean_result": result.to_dict()})
 
 
@@ -172,6 +223,7 @@ def main() -> int:
     audit.add_argument("--input", required=True)
     audit.add_argument("--result", required=True)
     audit.add_argument("--max-pages", type=int, default=2000)
+    audit.add_argument("--max-input-bytes", type=int, default=250 * 1024 * 1024)
     audit.set_defaults(func=cmd_audit)
 
     preview = sub.add_parser("preview")
@@ -183,6 +235,8 @@ def main() -> int:
     preview.add_argument("--kind", choices=["original", "clean"], required=True)
     preview.add_argument("--remove", choices=["redactions", "all-annotations"], default="redactions")
     preview.add_argument("--max-pixels", type=int, default=25_000_000)
+    preview.add_argument("--max-pages", type=int, default=2000)
+    preview.add_argument("--max-input-bytes", type=int, default=250 * 1024 * 1024)
     preview.set_defaults(func=cmd_preview)
 
     export = sub.add_parser("export")
@@ -191,6 +245,13 @@ def main() -> int:
     export.add_argument("--result", required=True)
     export.add_argument("--mode", choices=["clean", "side_by_side"], required=True)
     export.add_argument("--remove", choices=["redactions", "all-annotations"], default="redactions")
+    export.add_argument("--max-pages", type=int, default=2000)
+    export.add_argument("--max-input-bytes", type=int, default=250 * 1024 * 1024)
+    export.add_argument("--max-output-bytes", type=int, default=1024 * 1024 * 1024)
+    sanitize_group = export.add_mutually_exclusive_group()
+    sanitize_group.add_argument("--sanitize-active-content", dest="sanitize_active_content", action="store_true")
+    sanitize_group.add_argument("--no-sanitize-active-content", dest="sanitize_active_content", action="store_false")
+    export.set_defaults(sanitize_active_content=True)
     export.set_defaults(func=cmd_export)
 
     args = ap.parse_args()
