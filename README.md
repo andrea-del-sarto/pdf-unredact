@@ -147,7 +147,7 @@ Since version **1.4.0**, the web host also uses:
 
 ### Isolated PDF processing
 
-Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.2**, `EngineClient` also owns its private temporary workspace and exposes opaque analysis handles instead of audit/temp paths, so a future Tauri or Flutter frontend can reuse the boundary without receiving internal filesystem details.
+Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.4**, `EngineClient` also uses opaque input/output capabilities, stages inputs into immutable private storage, and commits validated exports atomically. A future Tauri or Flutter frontend therefore does not receive worker paths or authorize its own filesystem roots.
 
 Worker execution is bounded by:
 
@@ -176,7 +176,7 @@ The address-space cap is disabled by default because native PDF libraries may re
 
 Uploads are streamed to private temporary files rather than buffered entirely in memory. Preview dimensions, page count, JSON request size, input size, output size, active job count, total workspace use, and minimum free-disk headroom are also bounded.
 
-Since **1.4.1**, exported PDFs are sanitized by default to remove active or attached content such as PDF JavaScript, active links/actions, and embedded files. In **1.4.2**, sanitization can be disabled explicitly; when enabled, the saved PDF is reopened and verified fail-closed before it is returned. Hidden text and redaction content remain preserved so recoverable text is not destroyed by the security pass.
+Since **1.4.1**, exported PDFs are sanitized by default to remove active or attached content such as PDF JavaScript, active links/actions, and embedded files. Sanitization can be disabled explicitly. In **1.4.4**, fail-closed verification also covers XFA, JavaScript name trees, RichMedia/Screen/file-attachment annotations, and additional executable or external action types. Hidden text and redaction content remain preserved so recoverable text is not destroyed by the security pass.
 
 Temporary work directories include an application marker so stale-cleanup only removes directories that were actually created by `pdf-unredact`. Temporary document data is removed when:
 
@@ -210,7 +210,7 @@ Security limits should only be raised when necessary.
 
 ## CLI
 
-The command-line interface remains fully available for scripted or headless workflows. Since version **1.4.2**, CLI and web operations use an engine-owned private workspace and opaque analysis handles in addition to the shared `EngineClient` validation layer and short-lived PDF worker.
+The command-line interface remains fully available for scripted or headless workflows. Since version **1.4.4**, CLI and web operations use engine-owned immutable input staging, opaque input/output/analysis handles, and atomic output commits in addition to the shared `EngineClient` validation layer and short-lived PDF worker.
 
 Release builds use `constraints-release.txt` to pin the tested PyMuPDF runtime and Hatchling build backend.
 

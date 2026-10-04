@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -923,21 +924,59 @@ def _remove_annotations(doc, mode: str = "redactions", page_numbers=None) -> int
     return removed
 
 
+def _xref_from_value(value: str) -> int | None:
+    """Return the referenced xref number for a simple ``N 0 R`` value."""
+    match = re.fullmatch(r"\s*(\d+)\s+\d+\s+R\s*", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
 def _clear_pdf_action_keys(doc) -> None:
-    """Clear action entry points that are not fully covered by PyMuPDF scrub()."""
+    """Clear executable/action entry points not fully covered by scrub()."""
     targets = []
     catalog = doc.pdf_catalog()
     if catalog:
         targets.append((catalog, ("OpenAction", "AA")))
+        # JavaScript name trees can execute without a page annotation.
+        try:
+            kind, value = doc.xref_get_key(catalog, "Names")
+            names_xref = _xref_from_value(value) if kind != "null" else None
+            if names_xref:
+                doc.xref_set_key(names_xref, "JavaScript", "null")
+        except Exception:
+            pass
+        # XFA may contain script and is not required by pdf-unredact.
+        try:
+            kind, value = doc.xref_get_key(catalog, "AcroForm")
+            acro_xref = _xref_from_value(value) if kind != "null" else None
+            if acro_xref:
+                doc.xref_set_key(acro_xref, "XFA", "null")
+                doc.xref_set_key(acro_xref, "AA", "null")
+        except Exception:
+            pass
+
+    dangerous_annot_types = {
+        getattr(pymupdf, "PDF_ANNOT_FILE_ATTACHMENT", -1),
+        getattr(pymupdf, "PDF_ANNOT_RICH_MEDIA", -1),
+        getattr(pymupdf, "PDF_ANNOT_SCREEN", -1),
+    }
     for page in doc:
         if page.xref:
             targets.append((page.xref, ("AA",)))
+        delete_annots = []
         for annot in page.annots() or []:
-            if annot.xref:
+            if annot.type[0] in dangerous_annot_types:
+                delete_annots.append(annot)
+            elif annot.xref:
                 targets.append((annot.xref, ("A", "AA")))
+        for annot in delete_annots:
+            try:
+                page.delete_annot(annot)
+            except Exception:
+                pass
         for widget in page.widgets() or []:
             if widget.xref:
                 targets.append((widget.xref, ("A", "AA")))
+
     for xref, keys in targets:
         for key in keys:
             try:
@@ -945,20 +984,13 @@ def _clear_pdf_action_keys(doc) -> None:
                 if kind != "null":
                     doc.xref_set_key(xref, key, "null")
             except Exception:
-                # Some malformed objects cannot be rewritten through the high-level
-                # API.  The subsequent scrub/save validation still runs; callers
-                # treat export failures as fatal rather than returning a partial file.
+                # The verifier below is fail-closed. A failed rewrite is safe
+                # only if the final saved PDF proves the entry point is absent.
                 pass
 
 
 def _sanitize_active_content(doc) -> None:
-    """Remove active / attached content without destroying recoverable hidden text.
-
-    PyMuPDF's scrub defaults deliberately remove hidden text and redactions,
-    which is unsuitable for an unredaction tool. Keep those two classes while
-    stripping JavaScript, attachments / embedded files, links / actions and
-    interactive-form responses that should not survive a security-oriented export.
-    """
+    """Remove active / attached content while preserving recoverable hidden text."""
     _clear_pdf_action_keys(doc)
     doc.scrub(
         attached_files=True,
@@ -986,14 +1018,12 @@ def _key_is_present(doc, xref: int, key: str) -> bool:
     try:
         kind, value = doc.xref_get_key(xref, key)
         return kind != "null" and str(value).strip() not in {"", "null"}
-    except Exception:
-        # Verification is fail-closed: an object we cannot inspect is not
-        # considered proven safe when sanitization was explicitly requested.
-        raise SecuritySanitizationError(f"unable to verify PDF action key: {key}")
+    except Exception as exc:
+        raise SecuritySanitizationError(f"unable to verify PDF action key: {key}") from exc
 
 
 def _verify_no_active_content(path: str) -> None:
-    """Re-open a saved PDF and prove that common active-content entry points are absent."""
+    """Re-open an export and fail closed if supported active content remains."""
     check = pymupdf.open(path)
     try:
         if check.embfile_count() != 0:
@@ -1005,12 +1035,19 @@ def _verify_no_active_content(path: str) -> None:
                 if _key_is_present(check, catalog, key):
                     raise SecuritySanitizationError(f"catalog {key} remains after sanitization")
 
+        dangerous_annot_types = {
+            getattr(pymupdf, "PDF_ANNOT_FILE_ATTACHMENT", -1),
+            getattr(pymupdf, "PDF_ANNOT_RICH_MEDIA", -1),
+            getattr(pymupdf, "PDF_ANNOT_SCREEN", -1),
+        }
         for page in check:
             if page.get_links():
                 raise SecuritySanitizationError("active links remain after sanitization")
             if page.xref and _key_is_present(check, page.xref, "AA"):
                 raise SecuritySanitizationError("page additional action remains after sanitization")
             for annot in page.annots() or []:
+                if annot.type[0] in dangerous_annot_types:
+                    raise SecuritySanitizationError("active annotation remains after sanitization")
                 if annot.xref:
                     for key in ("A", "AA"):
                         if _key_is_present(check, annot.xref, key):
@@ -1021,26 +1058,30 @@ def _verify_no_active_content(path: str) -> None:
                         if _key_is_present(check, widget.xref, key):
                             raise SecuritySanitizationError("form action remains after sanitization")
 
-        # After garbage=4, unreachable objects are discarded. Scan remaining
-        # dictionaries for executable action types that may not be surfaced by
-        # a high-level API. xref_object() does not include stream payload bytes.
-        dangerous_markers = (
-            "/S/JavaScript", "/S /JavaScript",
-            "/S/Launch", "/S /Launch",
-            "/S/SubmitForm", "/S /SubmitForm",
-            "/S/ImportData", "/S /ImportData",
+        # garbage=4 discards unreachable objects. Inspect every surviving
+        # dictionary for action types / structures that can execute code,
+        # launch external resources, submit data, or host rich media / XFA.
+        action_patterns = (
+            r"/S\s*/JavaScript\b", r"/S\s*/Launch\b",
+            r"/S\s*/SubmitForm\b", r"/S\s*/ImportData\b",
+            r"/S\s*/URI\b", r"/S\s*/GoToR\b", r"/S\s*/GoToE\b",
+            r"/S\s*/Rendition\b", r"/S\s*/Movie\b", r"/S\s*/Sound\b",
+            r"/Subtype\s*/RichMedia\b", r"/Subtype\s*/Screen\b",
         )
+        nonnull_keys = ("JavaScript", "XFA", "RichMediaContent", "RichMediaSettings")
         for xref in range(1, check.xref_length()):
             try:
                 obj = check.xref_object(xref, compressed=True)
             except Exception as exc:
                 raise SecuritySanitizationError("unable to verify exported PDF objects") from exc
             compact = " ".join(str(obj).split())
-            if any(marker in compact for marker in dangerous_markers):
-                raise SecuritySanitizationError("executable PDF action remains after sanitization")
+            if any(re.search(pattern, compact) for pattern in action_patterns):
+                raise SecuritySanitizationError("active PDF action remains after sanitization")
+            for key in nonnull_keys:
+                if re.search(rf"/{key}\s+(?!null(?:\s|/|>|$))", compact):
+                    raise SecuritySanitizationError("active PDF content remains after sanitization")
     finally:
         check.close()
-
 
 def _validate_saved_pdf(
     path: str,
@@ -1213,19 +1254,22 @@ def main() -> None:
     from engine_api import EngineClient
 
     engine = EngineClient()
+    input_handle = None
+    output_handle = None
     try:
+        input_handle = engine.register_input(args.input_pdf)
+        output_handle = engine.register_output(args.output)
         engine.export(
-            input_path=args.input_pdf,
-            output_path=args.output,
+            input_handle=input_handle,
+            output_handle=output_handle,
             mode=args.mode,
             remove=args.remove,
-            authorized_output_roots=[Path(args.output).resolve().parent],
             sanitize_active_content=args.sanitize_active_content,
         )
         print(f"Wrote: {args.output}")
 
         if args.stats or args.stats_json:
-            analysis = engine.audit(args.input_pdf)
+            analysis = engine.audit(input_handle)
             stats = _stats_from_dict(analysis.stats)
             if args.stats:
                 print(stats.display())
@@ -1236,6 +1280,8 @@ def main() -> None:
                 print(f"Stats written to: {args.stats_json}")
             engine.close_analysis(analysis.analysis_id)
     finally:
+        engine.close_output(output_handle)
+        engine.close_input(input_handle)
         engine.close()
 
 

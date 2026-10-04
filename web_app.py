@@ -144,6 +144,7 @@ def _cleanup_all() -> None:
         JOBS.clear()
     for meta in metas:
         ENGINE.close_analysis(meta.get("analysis_id"))
+        ENGINE.close_input(meta.get("input_handle"))
         shutil.rmtree(meta.get("dir", ""), ignore_errors=True)
     shutil.rmtree(WORK_ROOT, ignore_errors=True)
     with BROWSER_PROFILES_LOCK:
@@ -175,6 +176,7 @@ def _cleanup_old_jobs():
                 lock.release()
     for meta in expired:
         ENGINE.close_analysis(meta.get("analysis_id"))
+        ENGINE.close_input(meta.get("input_handle"))
         shutil.rmtree(meta["dir"], ignore_errors=True)
 
 
@@ -190,36 +192,35 @@ def _probe_worker() -> None:
     ENGINE.probe()
 
 
-def _audit_pdf(input_path: str) -> tuple[int, dict, str]:
-    analysis = ENGINE.audit(input_path)
+def _audit_pdf(input_handle: str) -> tuple[int, dict, str]:
+    analysis = ENGINE.audit(input_handle)
     return analysis.pages, analysis.stats, analysis.analysis_id
 
 
 def _render_preview_worker(meta: dict, page_number: int, kind: str, remove_mode: str) -> Path:
     token = uuid.uuid4().hex
-    output = Path(meta["dir"]) / f"preview-{token}.png"
     return ENGINE.preview(
-        input_path=meta["input"],
         analysis_id=meta["analysis_id"],
-        output_path=output,
         page=page_number,
         kind=kind,
         remove=remove_mode,
-        authorized_output_roots=[meta["dir"]],
     )
 
 
 def _export_pdf_worker(
     meta: dict, output: str, mode: str, remove: str, sanitize_active_content: bool
 ) -> dict:
-    return ENGINE.export(
-        input_path=meta["input"],
-        output_path=output,
-        mode=mode,
-        remove=remove,
-        authorized_output_roots=[meta["dir"]],
-        sanitize_active_content=sanitize_active_content,
-    )
+    output_handle = ENGINE.register_output(output)
+    try:
+        return ENGINE.export(
+            input_handle=meta["input_handle"],
+            output_handle=output_handle,
+            mode=mode,
+            remove=remove,
+            sanitize_active_content=sanitize_active_content,
+        )
+    finally:
+        ENGINE.close_output(output_handle)
 
 def _workspace_reserve(bytes_needed: int, *, reserve_job: bool = False) -> None:
     global WORKSPACE_RESERVED_BYTES, WORKSPACE_RESERVED_JOBS
@@ -246,7 +247,7 @@ def _workspace_release(bytes_reserved: int, *, reserved_job: bool = False) -> No
 
 
 def _export_reservation(meta: dict) -> int:
-    input_size = Path(meta["input"]).stat().st_size
+    input_size = int(meta.get("input_size", 0))
     return min(ENGINE_LIMITS.max_output_bytes, max(64 * 1024 * 1024, input_size * 3))
 
 def _same_host_value(host: str, port: int) -> bool:
@@ -430,6 +431,7 @@ class Handler(BaseHTTPRequestHandler):
             filename = _safe_filename(urllib.parse.unquote(self.headers.get("X-Filename", "document.pdf"))); job_id = uuid.uuid4().hex
             reserved = 0
             analysis_id = None
+            input_handle = None
             try:
                 _workspace_reserve(length, reserve_job=True); reserved = length
                 job_dir = _secure_job_dir(job_id); input_path = job_dir / "input.pdf"; remaining = length; first = b""
@@ -442,14 +444,17 @@ class Handler(BaseHTTPRequestHandler):
                         if len(first) < 5: first += chunk[:5-len(first)]
                         f.write(chunk); remaining -= len(chunk)
                 if first != b"%PDF-": raise ValueError("invalid PDF signature")
-                pages, stats, analysis_id = _audit_pdf(str(input_path))
-                meta = {"dir": str(job_dir), "input": str(input_path), "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "analysis_id": analysis_id, "lock": threading.RLock()}
+                input_handle = ENGINE.register_input(input_path)
+                input_path.unlink(missing_ok=True)
+                pages, stats, analysis_id = _audit_pdf(input_handle)
+                meta = {"dir": str(job_dir), "input_handle": input_handle, "input_size": length, "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "analysis_id": analysis_id, "lock": threading.RLock()}
                 with JOBS_LOCK: JOBS[job_id] = meta
                 _workspace_release(reserved, reserved_job=True); reserved = 0
                 self._json(200, {"job_id": job_id, "filename": filename, "pages": pages, "stats": stats})
             except Exception as exc:
                 _workspace_release(reserved, reserved_job=True)
                 ENGINE.close_analysis(analysis_id)
+                ENGINE.close_input(input_handle)
                 shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True); self._safe_failure(exc, lang, "cannot_analyze")
             return
         if parsed.path.startswith("/api/audit/"):
@@ -458,7 +463,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with meta["lock"]:
                     old_analysis_id = meta.get("analysis_id")
-                    pages, stats, analysis_id = _audit_pdf(meta["input"])
+                    pages, stats, analysis_id = _audit_pdf(meta["input_handle"])
                     if pages != meta["pages"]:
                         ENGINE.close_analysis(analysis_id)
                         raise RuntimeError("page count changed")
@@ -514,6 +519,7 @@ class Handler(BaseHTTPRequestHandler):
                 removed = JOBS.pop(job_id, None)
             if removed:
                 ENGINE.close_analysis(removed.get("analysis_id"))
+                ENGINE.close_input(removed.get("input_handle"))
                 shutil.rmtree(removed["dir"], ignore_errors=True)
         self._send(204)
 

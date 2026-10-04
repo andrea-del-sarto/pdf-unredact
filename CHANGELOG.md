@@ -4,6 +4,28 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-10-05
+
+### Added
+
+- Added capability-based input/output handles to the frontend-neutral engine API. Frontends no longer provide authorization-root lists to approve their own filesystem requests.
+- Added immutable input staging: user-selected PDFs are copied into an engine-owned private workspace before audit, preview, or export, with staging covered by the engine workspace quota.
+- Added atomic export commits. Workers write to a random temporary file on the destination filesystem; the final destination is replaced only after successful processing and validation.
+- Extended sanitized-export verification to XFA, JavaScript name trees, RichMedia/Screen/file-attachment annotations, and additional executable/external action types.
+
+### Changed
+
+- Preview generation now writes only to engine-owned temporary storage and no longer accepts caller-selected output paths.
+- PyMuPDF is pinned to `1.26.7` in both project metadata and release constraints; Hatchling remains pinned to `1.27.0` for reproducible release builds.
+- Updated the web host and CLI to use opaque engine capabilities instead of passing input/output authorization paths.
+
+### Security
+
+- Removed the caller-controlled `authorized_output_roots` authorization model from the public engine API.
+- Eliminated the audit/preview/export TOCTOU window caused by repeatedly reopening a mutable user path.
+- Failed exports cannot truncate or partially replace an existing destination PDF.
+- Sanitized exports fail closed when extended active-content checks cannot prove the saved PDF free of the supported active-content classes.
+
 ## [1.4.3] - 2026-10-04
 
 ### Changed
