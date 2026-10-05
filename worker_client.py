@@ -29,6 +29,10 @@ class WorkerMemoryError(WorkerError):
     pass
 
 
+class WorkerCancelledError(WorkerError):
+    pass
+
+
 def worker_env(*, max_file_bytes: int | None = None) -> dict[str, str]:
     # Keep only variables needed for a normal Python/native-library launch.
     # In particular, do not inherit PYTHONPATH/PYTHONHOME or dynamic-loader
@@ -153,6 +157,8 @@ def run_worker(
     concurrency_guard=None,
     log_debug: Callable[[str], None] | None = None,
     log_error: Callable[[str], None] | None = None,
+    cancel_event=None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     if not WORKER_PATH.is_file():
         raise WorkerError("PDF worker is unavailable")
@@ -172,7 +178,16 @@ def run_worker(
         def __exit__(self, *exc): return False
 
     guard = concurrency_guard if concurrency_guard is not None else _NullGuard()
+    def emit(phase: str, **extra) -> None:
+        if progress_callback:
+            payload = {"phase": phase, **extra}
+            try:
+                progress_callback(payload)
+            except Exception:
+                pass
+
     stderr_file = tempfile.TemporaryFile()
+    emit("worker_starting")
     with guard:
         proc = subprocess.Popen(
             cmd,
@@ -184,19 +199,27 @@ def run_worker(
             start_new_session=(os.name != "nt"),
             creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0),
         )
+        emit("worker_running", pid=proc.pid)
         deadline = time.monotonic() + timeout
         next_rss_check = 0.0
         while proc.poll() is None:
             now = time.monotonic()
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_process(proc)
+                stderr_file.close()
+                emit("cancelled")
+                raise WorkerCancelledError("PDF worker operation was cancelled")
             if now >= deadline:
                 _terminate_process(proc)
                 stderr_file.close()
+                emit("timeout")
                 raise TimeoutError("PDF worker timed out")
             if rss_limit and now >= next_rss_check:
                 rss = process_rss_bytes(proc.pid)
                 if rss is not None and rss > rss_limit:
                     _terminate_process(proc)
                     stderr_file.close()
+                    emit("memory_limit")
                     raise WorkerMemoryError(
                         f"PDF worker exceeded the resident-memory limit ({max_rss_mb} MB)"
                     )
@@ -223,5 +246,8 @@ def run_worker(
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkerError("PDF worker returned an invalid result") from exc
     if not data.get("ok"):
-        raise WorkerError(data.get("error") or "PDF worker failed")
+        error = WorkerError(data.get("error") or "PDF worker failed")
+        setattr(error, "worker_error_type", data.get("error_type"))
+        raise error
+    emit("worker_completed")
     return data

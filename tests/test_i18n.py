@@ -57,6 +57,14 @@ class I18nTests(unittest.TestCase):
         self.assertIn('data-i18n="findings_details"', html)
         self.assertNotIn('<details class="card findingsCard" id="findingsDetails" open>', html)
 
+    def test_sanitization_description_matches_1_4_4_scope(self):
+        it = json.loads((ROOT / "locales" / "it.json").read_text(encoding="utf-8"))["frontend"]["sanitize_active_content_desc"]
+        en = json.loads((ROOT / "locales" / "en.json").read_text(encoding="utf-8"))["frontend"]["sanitize_active_content_desc"]
+        for term in ("JavaScript", "XFA", "multimediali", "file incorporati"):
+            self.assertIn(term, it)
+        for term in ("JavaScript", "XFA", "multimedia", "embedded files"):
+            self.assertIn(term, en)
+
     def test_italian_uses_sanificare_terminology(self):
         catalog = json.dumps(i18n.frontend_catalog("it"), ensure_ascii=False).lower()
         self.assertNotIn("sanitizz", catalog)

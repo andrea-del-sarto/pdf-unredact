@@ -4,6 +4,28 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.5] - 2026-10-05
+
+### Added
+
+- Added a versioned frontend-neutral engine contract (`ENGINE_API_VERSION = 1`) and `api_info()` capability discovery for the future Tauri/Flutter bridge.
+- Added cancellable operation handles for audit, preview, export, and probe. Frontends can create an operation, pass its opaque ID to the engine call, and cancel it without knowing worker-process details.
+- Added structured progress events with stable fields (`operation_id`, operation, phase, current, total) and no dependency on the legacy web UI.
+- Added stable engine error codes and serializable `EngineError` payloads so desktop frontends do not need to parse Python exception text.
+- Added a generic idempotent `release(handle)` lifecycle primitive for input, output, analysis, and operation capabilities.
+
+### Changed
+
+- Worker cancellation is now checked by the parent while the subprocess is running and terminates the worker process group on request.
+- Audit, preview, export, and probe responses/events expose the engine API version where applicable.
+- Public engine validation failures now use stable error codes for invalid handles, invalid input, size/page limits, worker timeouts/crashes, cancellation, workspace exhaustion, and export failures.
+
+### Security / hardening
+
+- Cancellation remains parent-controlled: untrusted PDF code cannot decide whether an operation is considered cancelled.
+- Operation handles are opaque, single-operation capabilities and cannot be reused concurrently.
+- Progress callbacks are isolated from engine execution: callback failures cannot abort or alter PDF processing.
+
 ## [1.4.4] - 2026-10-05
 
 ### Added

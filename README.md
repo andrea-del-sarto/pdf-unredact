@@ -149,6 +149,8 @@ Since version **1.4.0**, the web host also uses:
 
 Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.4**, `EngineClient` also uses opaque input/output capabilities, stages inputs into immutable private storage, and commits validated exports atomically. A future Tauri or Flutter frontend therefore does not receive worker paths or authorize its own filesystem roots.
 
+Since **1.4.5**, the engine boundary is explicitly versioned (`ENGINE_API_VERSION = 1`). Long-running operations may use an opaque `operation_id` for cancellation, emit structured progress events, and fail with stable `EngineError.code` values instead of requiring a frontend to parse exception text. `release(handle)` provides a single idempotent lifecycle primitive for desktop bridges. The legacy web UI may continue using synchronous calls, while a Tauri/Flutter host can create operation handles before dispatching work from its own async/task layer.
+
 Worker execution is bounded by:
 
 - timeouts;

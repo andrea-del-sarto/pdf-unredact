@@ -76,7 +76,7 @@
     "side_by_side": "Affiancato",
     "security": "Sicurezza",
     "sanitize_active_content": "Sanifica i contenuti attivi",
-    "sanitize_active_content_desc": "La sanificazione rimuove JavaScript, azioni, link attivi e file incorporati. Consigliata.",
+    "sanitize_active_content_desc": "La sanificazione rimuove JavaScript, azioni e link attivi, moduli XFA, contenuti multimediali e file incorporati. Consigliata.",
     "choose_save_location": "Scegli dove salvare il PDF…",
     "pdf_file_type": "Documento PDF",
     "save_cancelled": "Salvataggio annullato.",

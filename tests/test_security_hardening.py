@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import inspect
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import pymupdf
 
-from engine_api import EngineClient, EngineLimits
+from engine_api import ENGINE_API_VERSION, EngineClient, EngineError, EngineErrorCode, EngineLimits
 import pdf_unredact
 
 
@@ -123,8 +125,9 @@ class SecurityHardeningTests(unittest.TestCase):
             source = self._fixture(root)
             client = EngineClient(limits=EngineLimits(max_input_bytes=10))
             try:
-                with self.assertRaises(ValueError):
+                with self.assertRaises(EngineError) as ctx:
                     client.register_input(source)
+                self.assertEqual(ctx.exception.code, EngineErrorCode.INPUT_TOO_LARGE)
             finally:
                 client.close()
 
@@ -151,8 +154,9 @@ class SecurityHardeningTests(unittest.TestCase):
             source = self._fixture(root)
             client = EngineClient(limits=EngineLimits(max_workspace_bytes=10))
             try:
-                with self.assertRaises(OSError):
+                with self.assertRaises(EngineError) as ctx:
                     client.register_input(source)
+                self.assertEqual(ctx.exception.code, EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED)
             finally:
                 client.close()
 
@@ -190,6 +194,115 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertIn('"pymupdf==1.26.7"', pyproject)
         self.assertIn("pymupdf==1.26.7", constraints)
         self.assertEqual(pymupdf.__version__, "1.26.7")
+
+    def test_engine_api_is_versioned_and_errors_are_structured(self):
+        client = EngineClient()
+        try:
+            info = client.api_info()
+            self.assertEqual(info["api_version"], ENGINE_API_VERSION)
+            self.assertIn("cancel", info["operations"])
+            self.assertIn(EngineErrorCode.CANCELLED, info["error_codes"])
+            with self.assertRaises(EngineError) as ctx:
+                client.audit("not-a-handle")
+            payload = ctx.exception.to_dict()
+            self.assertEqual(payload["api_version"], ENGINE_API_VERSION)
+            self.assertEqual(payload["code"], EngineErrorCode.HANDLE_UNAVAILABLE)
+        finally:
+            client.close()
+
+    def test_pre_cancelled_operation_fails_with_cancelled_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            client = EngineClient()
+            try:
+                ih = client.register_input(source)
+                op = client.create_operation("audit")
+                self.assertTrue(client.cancel(op))
+                with self.assertRaises(EngineError) as ctx:
+                    client.audit(ih, operation_id=op)
+                self.assertEqual(ctx.exception.code, EngineErrorCode.CANCELLED)
+                client.close_operation(op)
+            finally:
+                client.close()
+
+    def test_progress_events_are_structured_and_frontend_neutral(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            client = EngineClient(progress_callback=events.append)
+            try:
+                ih = client.register_input(source)
+                result = client.audit(ih)
+                self.assertEqual(result.to_dict()["api_version"], ENGINE_API_VERSION)
+                payloads = [event.to_dict() for event in events]
+                self.assertTrue(any(p["phase"] == "starting" for p in payloads))
+                self.assertTrue(any(p["phase"] == "worker_running" for p in payloads))
+                completed = [p for p in payloads if p["phase"] == "completed"]
+                self.assertTrue(completed)
+                self.assertEqual(completed[-1]["current"], 1)
+                self.assertEqual(completed[-1]["total"], 1)
+            finally:
+                client.close()
+
+    def test_release_is_idempotent_for_capability_handles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            output = root / "out.pdf"
+            client = EngineClient()
+            try:
+                ih = client.register_input(source)
+                oh = client.register_output(output)
+                analysis = client.audit(ih)
+                self.assertTrue(client.release(analysis.analysis_id))
+                self.assertFalse(client.release(analysis.analysis_id))
+                self.assertTrue(client.release(oh))
+                self.assertTrue(client.release(ih))
+            finally:
+                client.close()
+
+    def test_running_operation_can_be_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            client = EngineClient()
+            try:
+                ih = client.register_input(source)
+                op = client.create_operation("audit")
+                started = threading.Event()
+                captured = []
+
+                def fake_run_worker(*args, cancel_event=None, **kwargs):
+                    started.set()
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        if cancel_event is not None and cancel_event.is_set():
+                            from worker_client import WorkerCancelledError
+                            raise WorkerCancelledError("cancelled")
+                        time.sleep(0.01)
+                    raise AssertionError("operation was not cancelled")
+
+                def run():
+                    try:
+                        with mock.patch("engine_api.run_worker", side_effect=fake_run_worker):
+                            client.audit(ih, operation_id=op)
+                    except BaseException as exc:
+                        captured.append(exc)
+
+                thread = threading.Thread(target=run)
+                thread.start()
+                self.assertTrue(started.wait(1))
+                self.assertTrue(client.cancel(op))
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(len(captured), 1)
+                self.assertIsInstance(captured[0], EngineError)
+                self.assertEqual(captured[0].code, EngineErrorCode.CANCELLED)
+                client.close_operation(op)
+            finally:
+                client.close()
 
 
 if __name__ == "__main__":

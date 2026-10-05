@@ -76,7 +76,7 @@
     "side_by_side": "Side-by-side",
     "security": "Security",
     "sanitize_active_content": "Sanitize active content",
-    "sanitize_active_content_desc": "Removes JavaScript, actions, active links, and embedded files. Recommended.",
+    "sanitize_active_content_desc": "Removes JavaScript, active actions and links, XFA forms, multimedia content, and embedded files. Recommended.",
     "choose_save_location": "Choose where to save the PDF…",
     "pdf_file_type": "PDF document",
     "save_cancelled": "Save cancelled.",
