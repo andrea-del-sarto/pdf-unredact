@@ -16,6 +16,22 @@ BBox = Tuple[float, float, float, float]
 DARKNESS_THRESHOLD = 0.15
 
 
+@dataclass(frozen=True)
+class DetectionRules:
+    darkness_threshold: float = 0.15
+    min_width: float = 10.0
+    min_height: float = 5.0
+    word_overlap_threshold: float = 0.5
+
+    def validated(self) -> "DetectionRules":
+        return DetectionRules(
+            darkness_threshold=max(0.0, min(1.0, float(self.darkness_threshold))),
+            min_width=max(0.0, min(5000.0, float(self.min_width))),
+            min_height=max(0.0, min(5000.0, float(self.min_height))),
+            word_overlap_threshold=max(0.01, min(1.0, float(self.word_overlap_threshold))),
+        )
+
+
 @dataclass
 class RedactionCandidate:
     page: int
@@ -27,6 +43,8 @@ class RedactionCandidate:
     probable_applied: bool = False
     words_under: int = 0
     chars_under: int = 0
+    page_width: float = 0.0
+    page_height: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -93,23 +111,23 @@ def _bbox_key(box: BBox, precision: int = 2) -> Tuple[float, float, float, float
     return tuple(round(float(v), precision) for v in box)
 
 
-def _is_dark_fill(fill) -> bool:
+def _is_dark_fill(fill, threshold: float = DARKNESS_THRESHOLD) -> bool:
     if fill is None:
         return False
     if isinstance(fill, (list, tuple)):
         if len(fill) >= 3:
-            return all(float(c) <= DARKNESS_THRESHOLD for c in fill[:3])
+            return all(float(c) <= threshold for c in fill[:3])
         if len(fill) == 1:
-            return float(fill[0]) <= DARKNESS_THRESHOLD
+            return float(fill[0]) <= threshold
     try:
-        return float(fill) <= DARKNESS_THRESHOLD
+        return float(fill) <= threshold
     except (TypeError, ValueError):
         return False
 
 
-def _annotation_is_dark(annot) -> bool:
+def _annotation_is_dark(annot, threshold: float = DARKNESS_THRESHOLD) -> bool:
     colors = annot.colors or {}
-    return _is_dark_fill(colors.get("fill")) or _is_dark_fill(colors.get("stroke"))
+    return _is_dark_fill(colors.get("fill"), threshold) or _is_dark_fill(colors.get("stroke"), threshold)
 
 
 def _annotation_quads(annot) -> List[BBox]:
@@ -145,15 +163,15 @@ def _annotation_opacity(annot) -> float:
     return 1.0 if opacity < 0 else opacity
 
 
-def _is_redaction_markup(annot) -> bool:
+def _is_redaction_markup(annot, threshold: float = DARKNESS_THRESHOLD) -> bool:
     annot_type = annot.type[0]
     if annot_type == pymupdf.PDF_ANNOT_REDACT:
         return True
     if annot_type == pymupdf.PDF_ANNOT_HIGHLIGHT:
-        return _annotation_opacity(annot) >= 0.8 and _annotation_is_dark(annot)
+        return _annotation_opacity(annot) >= 0.8 and _annotation_is_dark(annot, threshold)
     if annot_type == pymupdf.PDF_ANNOT_SQUARE:
         colors = annot.colors or {}
-        return _annotation_opacity(annot) >= 0.8 and _is_dark_fill(colors.get("fill"))
+        return _annotation_opacity(annot) >= 0.8 and _is_dark_fill(colors.get("fill"), threshold)
     return False
 
 
@@ -171,7 +189,8 @@ def _drawing_is_single_cover_shape(drawing) -> bool:
     return len(items) == 1 and items[0][0] == "re"
 
 
-def detect_redaction_candidates(pdf_path: str) -> List[List[RedactionCandidate]]:
+def detect_redaction_candidates(pdf_path: str, rules: DetectionRules | None = None) -> List[List[RedactionCandidate]]:
+    rules = (rules or DetectionRules()).validated()
     doc = pymupdf.open(pdf_path)
     pages: List[List[RedactionCandidate]] = []
 
@@ -181,7 +200,7 @@ def detect_redaction_candidates(pdf_path: str) -> List[List[RedactionCandidate]]
             annotation_boxes: List[BBox] = []
 
             for annot in page.annots() or []:
-                if not _is_redaction_markup(annot):
+                if not _is_redaction_markup(annot, rules.darkness_threshold):
                     continue
                 source_name = (
                     "annotation:redact"
@@ -196,7 +215,7 @@ def detect_redaction_candidates(pdf_path: str) -> List[List[RedactionCandidate]]
                     )
 
             for drawing in page.get_drawings():
-                if not _is_dark_fill(drawing.get("fill")):
+                if not _is_dark_fill(drawing.get("fill"), rules.darkness_threshold):
                     continue
                 if not _drawing_is_single_cover_shape(drawing):
                     continue
@@ -206,7 +225,7 @@ def detect_redaction_candidates(pdf_path: str) -> List[List[RedactionCandidate]]
                 box = tuple(float(v) for v in rect)
                 width = box[2] - box[0]
                 height = box[3] - box[1]
-                if width <= 10 or height <= 5:
+                if width <= rules.min_width or height <= rules.min_height:
                     continue
                 if any(_bbox_iou(box, abox) >= 0.9 for abox in annotation_boxes):
                     continue
@@ -781,6 +800,8 @@ def _candidate_from_dict(data: dict) -> RedactionCandidate:
         probable_applied=bool(data.get("probable_applied", False)),
         words_under=int(data.get("words_under", 0)),
         chars_under=int(data.get("chars_under", 0)),
+        page_width=float(data.get("page_width", 0.0)),
+        page_height=float(data.get("page_height", 0.0)),
     )
 
 
@@ -818,8 +839,9 @@ def _looks_like_text_redaction_box(box: BBox) -> bool:
     return 8.0 <= height <= 45.0 and width >= max(24.0, height * 2.5)
 
 
-def compute_redaction_stats(pdf_path: str) -> RedactionStats:
-    candidates_by_page = detect_redaction_candidates(pdf_path)
+def compute_redaction_stats(pdf_path: str, rules: DetectionRules | None = None) -> RedactionStats:
+    rules = (rules or DetectionRules()).validated()
+    candidates_by_page = detect_redaction_candidates(pdf_path, rules)
     total_words = total_chars = words_under = chars_under = 0
 
     # Use PyMuPDF word geometry so coordinates are in the same page coordinate
@@ -829,6 +851,9 @@ def compute_redaction_stats(pdf_path: str) -> RedactionStats:
         for page_index, page in enumerate(doc):
             words = page.get_text("words")
             page_candidates = candidates_by_page[page_index]
+            for candidate in page_candidates:
+                candidate.page_width = float(page.rect.width)
+                candidate.page_height = float(page.rect.height)
             for word in words:
                 text = str(word[4])
                 if not text.strip():
@@ -838,7 +863,7 @@ def compute_redaction_stats(pdf_path: str) -> RedactionStats:
                 word_bbox = tuple(float(v) for v in word[:4])
                 matched = []
                 for candidate in page_candidates:
-                    if word_overlaps_box(word_bbox, candidate.box):
+                    if word_overlaps_box(word_bbox, candidate.box, rules.word_overlap_threshold):
                         candidate.recoverable = True
                         candidate.words_under += 1
                         candidate.chars_under += len(text)
@@ -885,6 +910,40 @@ def compute_redaction_stats(pdf_path: str) -> RedactionStats:
         hidden_text_percentage=hidden_text_percentage,
         findings=findings,
     )
+
+
+def extract_recovered_text(pdf_path: str, findings: List[RedactionCandidate]) -> list[dict]:
+    """Return text surviving underneath recoverable detection boxes."""
+    by_page: dict[int, list[RedactionCandidate]] = {}
+    for finding in findings:
+        if finding.recoverable:
+            by_page.setdefault(finding.page, []).append(finding)
+    entries: list[dict] = []
+    doc = pymupdf.open(pdf_path)
+    try:
+        for page_no, candidates in sorted(by_page.items()):
+            if not (1 <= page_no <= doc.page_count):
+                continue
+            page = doc[page_no - 1]
+            words = page.get_text("words")
+            for finding in candidates:
+                selected = []
+                for word in words:
+                    text = str(word[4])
+                    if text.strip() and word_overlaps_box(tuple(float(v) for v in word[:4]), finding.box, 0.25):
+                        selected.append((float(word[1]), float(word[0]), text))
+                selected.sort(key=lambda item: (round(item[0], 1), item[1]))
+                recovered = " ".join(item[2] for item in selected).strip()
+                if recovered:
+                    entries.append({
+                        "page": finding.page,
+                        "source": finding.source,
+                        "box": [float(v) for v in finding.box],
+                        "text": recovered,
+                    })
+    finally:
+        doc.close()
+    return entries
 
 
 def _remove_annotations(doc, mode: str = "redactions", page_numbers=None) -> int:
@@ -1110,11 +1169,20 @@ def make_clean_pdf(
     remove: str = "redactions",
     *,
     sanitize_active_content: bool = True,
+    page_numbers: list[int] | None = None,
+    detection_rules: DetectionRules | None = None,
 ) -> CleanResult:
-    stats = compute_redaction_stats(input_pdf)
+    stats = compute_redaction_stats(input_pdf, detection_rules)
     doc = pymupdf.open(input_pdf)
     try:
-        result = _clean_document(doc, stats.findings, remove=remove)
+        result = _clean_document(doc, stats.findings, remove=remove, page_numbers=page_numbers)
+        if page_numbers is not None:
+            keep = sorted({int(p) for p in page_numbers if 1 <= int(p) <= doc.page_count})
+            if not keep:
+                raise ValueError("no pages selected for export")
+            for index in range(doc.page_count - 1, -1, -1):
+                if index + 1 not in keep:
+                    doc.delete_page(index)
         if sanitize_active_content:
             _sanitize_active_content(doc)
             result.active_content_sanitized = True
@@ -1139,17 +1207,19 @@ def make_side_by_side(
     remove: str = "redactions",
     *,
     sanitize_active_content: bool = True,
+    page_numbers: list[int] | None = None,
+    detection_rules: DetectionRules | None = None,
 ) -> CleanResult:
-    stats = compute_redaction_stats(input_pdf)
+    stats = compute_redaction_stats(input_pdf, detection_rules)
     src = pymupdf.open(input_pdf)
     clean = pymupdf.open(input_pdf)
     out = pymupdf.open()
     try:
-        result = _clean_document(clean, stats.findings, remove=remove)
+        result = _clean_document(clean, stats.findings, remove=remove, page_numbers=page_numbers)
         if sanitize_active_content:
             _sanitize_active_content(clean)
             result.active_content_sanitized = True
-        for page_number in range(src.page_count):
+        for page_number in ([p - 1 for p in sorted(set(page_numbers)) if 1 <= p <= src.page_count] if page_numbers is not None else range(src.page_count)):
             src_page = src[page_number]
             rect = src_page.rect
             w, h = rect.width, rect.height
@@ -1209,6 +1279,12 @@ def main() -> None:
     )
     ap.add_argument("--stats", action="store_true", help="Display redaction audit statistics")
     ap.add_argument("--stats-json", metavar="FILE", help="Write detailed audit stats to JSON")
+    ap.add_argument("--recovered-text", metavar="FILE", help="Export recovered text as .txt, .json, or .csv")
+    ap.add_argument("--only-pages-with-findings", action="store_true", help="Export only pages containing detected findings")
+    ap.add_argument("--darkness-threshold", type=float, default=0.15, help="Dark-fill threshold between 0 and 1")
+    ap.add_argument("--min-width", type=float, default=10.0, help="Minimum dark rectangle width in points")
+    ap.add_argument("--min-height", type=float, default=5.0, help="Minimum dark rectangle height in points")
+    ap.add_argument("--word-overlap-threshold", type=float, default=0.5, help="Minimum text overlap ratio between 0.01 and 1")
     ap.add_argument("--web", action="store_true", help="Start the private local web interface")
     ap.add_argument("--port", type=int, default=8765, help="Preferred local web port (default: 8765; falls back automatically if busy)")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser automatically")
@@ -1258,6 +1334,13 @@ def main() -> None:
     output_handle = None
     try:
         input_handle = engine.register_input(args.input_pdf)
+        rules = {
+            "darkness_threshold": args.darkness_threshold,
+            "min_width": args.min_width,
+            "min_height": args.min_height,
+            "word_overlap_threshold": args.word_overlap_threshold,
+        }
+        analysis = engine.audit(input_handle, detection_rules=rules)
         output_handle = engine.register_output(args.output)
         engine.export(
             input_handle=input_handle,
@@ -1265,20 +1348,37 @@ def main() -> None:
             mode=args.mode,
             remove=args.remove,
             sanitize_active_content=args.sanitize_active_content,
+            analysis_id=analysis.analysis_id,
+            only_pages_with_findings=args.only_pages_with_findings,
         )
         print(f"Wrote: {args.output}")
 
-        if args.stats or args.stats_json:
-            analysis = engine.audit(input_handle)
-            stats = _stats_from_dict(analysis.stats)
-            if args.stats:
-                print(stats.display())
-            if args.stats_json:
-                ensure_parent_dir(args.stats_json)
-                with open(args.stats_json, "w", encoding="utf-8") as f:
-                    f.write(stats.to_json())
-                print(f"Stats written to: {args.stats_json}")
-            engine.close_analysis(analysis.analysis_id)
+        stats = _stats_from_dict(analysis.stats)
+        if args.stats:
+            print(stats.display())
+        if args.stats_json:
+            ensure_parent_dir(args.stats_json)
+            with open(args.stats_json, "w", encoding="utf-8") as f:
+                f.write(stats.to_json())
+            print(f"Stats written to: {args.stats_json}")
+        if args.recovered_text:
+            import csv
+            recovered = engine.extract_text(analysis.analysis_id).get("entries", [])
+            target = Path(args.recovered_text)
+            ensure_parent_dir(str(target))
+            suffix = target.suffix.lower()
+            if suffix == ".json":
+                target.write_text(json.dumps(recovered, ensure_ascii=False, indent=2), encoding="utf-8")
+            elif suffix == ".csv":
+                with target.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh); writer.writerow(["page","source","x0","y0","x1","y1","text"])
+                    for item in recovered: writer.writerow([item["page"], item["source"], *item["box"], item["text"]])
+            elif suffix == ".txt":
+                target.write_text("\n".join(f'[Page {item["page"]}] {item["text"]}' for item in recovered) + ("\n" if recovered else ""), encoding="utf-8")
+            else:
+                ap.error("--recovered-text must end in .txt, .json, or .csv")
+            print(f"Recovered text written to: {target}")
+        engine.close_analysis(analysis.analysis_id)
     finally:
         engine.close_output(output_handle)
         engine.close_input(input_handle)

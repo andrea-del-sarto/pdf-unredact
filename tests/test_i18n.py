@@ -71,6 +71,77 @@ class I18nTests(unittest.TestCase):
         self.assertIn("sanifica", catalog)
         self.assertIn("sanificazione", catalog)
 
+    def test_preview_keyboard_navigation_is_wired_and_localized(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("ArrowLeft", js)
+        self.assertIn("ArrowRight", js)
+        self.assertIn("navigatePreview", js)
+        self.assertIn("isEditableTarget", js)
+        self.assertIn("document.fullscreenElement", js)
+        it = json.loads((ROOT / "locales" / "it.json").read_text(encoding="utf-8"))["frontend"]["preview_desc"]
+        en = json.loads((ROOT / "locales" / "en.json").read_text(encoding="utf-8"))["frontend"]["preview_desc"]
+        self.assertIn("←", it)
+        self.assertIn("→", it)
+        self.assertIn("←", en)
+        self.assertIn("→", en)
+
+    def test_1_5_0_ui_features_are_wired(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for control in ("searchInput", "zoomIn", "fitPage", "rotateLeft", "findingFilter", "highlightFindings", "onlyFindingPages", "advancedDetection"):
+            self.assertIn(f'id="{control}"', html)
+        for token in ("/api/search/", "/api/recovered-text/", "previewRotation", "only_pages_with_findings", "detectionRules", "watchProgress"):
+            self.assertIn(token, js)
+        self.assertIn('id="diagnosticDetails"', html)
+        self.assertIn('diagnosticPanel hidden', html)
+
+    def test_translation_placeholders_are_localized(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        used = set(re.findall(r'data-i18n-placeholder="([^"]+)"', html))
+        for language in i18n.SUPPORTED_LANGUAGES:
+            self.assertFalse(used - set(i18n.frontend_catalog(language)))
+
+    def test_1_5_0_topbar_icons_match_svg_style(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="infoButton"', html)
+        self.assertIn('<circle cx="12" cy="12" r="9"/>', html)
+        self.assertIn('const themeIcons=', js)
+        self.assertNotIn("$('infoButton').textContent='ⓘ'", js)
+
+    def test_diagnostics_toggle_label_tracks_state(self):
+        it = json.loads((ROOT / "locales" / "it.json").read_text(encoding="utf-8"))["frontend"]
+        en = json.loads((ROOT / "locales" / "en.json").read_text(encoding="utf-8"))["frontend"]
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(it["disable_diagnostics"], "Disabilita la modalità diagnostica")
+        self.assertEqual(en["disable_diagnostics"], "Disable diagnostics mode")
+        self.assertIn("enabled?'disable_diagnostics':'enable_diagnostics'", js)
+
+    def test_recovered_text_exports_use_save_picker(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("async function exportRecoveredText(format)", js)
+        self.assertIn("chooseFileDestination", js)
+        self.assertIn("exportRecoveredText('txt')", js)
+        self.assertIn("exportRecoveredText('json')", js)
+        self.assertIn("exportRecoveredText('csv')", js)
+
+    def test_upload_card_hides_after_successful_load(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("$('uploadCard').classList.add('hidden')", js)
+
+    def test_sidebar_card_order(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        aside = html.split('<aside class="sideCol">', 1)[1].split('</aside>', 1)[0]
+        keys = [
+            'data-i18n="export_heading"',
+            'data-i18n="output_format"',
+            'data-i18n="annotations"',
+            'data-i18n="security"',
+            'data-i18n="advanced_detection"',
+        ]
+        positions = [aside.index(key) for key in keys]
+        self.assertEqual(positions, sorted(positions))
+
 
 if __name__ == "__main__":
     unittest.main()

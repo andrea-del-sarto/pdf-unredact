@@ -106,6 +106,10 @@ class EngineLimits:
     export_timeout: int = 240
     min_free_bytes: int = 512 * _MIB
     max_workspace_bytes: int = 2048 * _MIB
+    max_input_handles: int = 32
+    max_output_handles: int = 32
+    max_analyses: int = 16
+    max_preview_artifacts: int = 64
 
     @classmethod
     def from_env(cls) -> "EngineLimits":
@@ -121,6 +125,10 @@ class EngineLimits:
             export_timeout=_env_int("PDF_UNREDACT_EXPORT_TIMEOUT", 240, minimum=1),
             min_free_bytes=_env_int("PDF_UNREDACT_MIN_FREE_MB", 512) * _MIB,
             max_workspace_bytes=_env_int("PDF_UNREDACT_MAX_WORKSPACE_MB", 2048, minimum=1) * _MIB,
+            max_input_handles=_env_int("PDF_UNREDACT_MAX_INPUT_HANDLES", 32, minimum=1),
+            max_output_handles=_env_int("PDF_UNREDACT_MAX_OUTPUT_HANDLES", 32, minimum=1),
+            max_analyses=_env_int("PDF_UNREDACT_MAX_ANALYSES", 16, minimum=1),
+            max_preview_artifacts=_env_int("PDF_UNREDACT_MAX_PREVIEWS", 64, minimum=1),
         )
 
 
@@ -129,6 +137,7 @@ class AnalysisResult:
     analysis_id: str
     pages: int
     stats: dict
+    integrity: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +145,22 @@ class AnalysisResult:
             "analysis_id": self.analysis_id,
             "pages": self.pages,
             "stats": self.stats,
+            "integrity": self.integrity or {},
+        }
+
+
+@dataclass(frozen=True)
+class ArtifactResult:
+    artifact_handle: str
+    mime: str
+    size: int
+
+    def to_dict(self) -> dict:
+        return {
+            "api_version": ENGINE_API_VERSION,
+            "artifact_handle": self.artifact_handle,
+            "mime": self.mime,
+            "size": self.size,
         }
 
 
@@ -202,7 +227,12 @@ class EngineClient:
         self._inputs: dict[str, dict] = {}
         self._outputs: dict[str, Path] = {}
         self._analyses: dict[str, dict] = {}
+        self._artifacts: dict[str, dict] = {}
         self._operations: dict[str, dict] = {}
+        self._workspace_used_bytes = 0
+        self._workspace_reserved_bytes = 0
+        self._reserved_analysis_slots = 0
+        self._reserved_preview_slots = 0
         self._temp_root = Path(tempfile.mkdtemp(prefix="pdf-unredact-engine-"))
         self._input_root = self._temp_root / "inputs"
         self._input_root.mkdir(mode=0o700)
@@ -222,13 +252,60 @@ class EngineClient:
                 op["cancel"].set()
             self._operations.clear()
             self._analyses.clear()
+            self._artifacts.clear()
             self._inputs.clear()
             self._outputs.clear()
+            self._workspace_used_bytes = 0
+            self._workspace_reserved_bytes = 0
+            self._reserved_analysis_slots = 0
+            self._reserved_preview_slots = 0
             shutil.rmtree(self._temp_root, ignore_errors=True)
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise EngineError(EngineErrorCode.ENGINE_CLOSED, "PDF engine is closed")
+
+    def _reserve_workspace(self, bytes_needed: int) -> int:
+        amount = max(0, int(bytes_needed))
+        with self._lock:
+            self._ensure_open()
+            if self._workspace_used_bytes + self._workspace_reserved_bytes + amount > self.limits.max_workspace_bytes:
+                raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "PDF engine workspace quota exceeded")
+            self._workspace_reserved_bytes += amount
+        return amount
+
+    def _cancel_workspace_reservation(self, amount: int) -> None:
+        if amount <= 0:
+            return
+        with self._lock:
+            self._workspace_reserved_bytes = max(0, self._workspace_reserved_bytes - int(amount))
+
+    def _commit_workspace_reservation(self, reserved: int, actual: int) -> None:
+        reserved = max(0, int(reserved))
+        actual = max(0, int(actual))
+        with self._lock:
+            self._workspace_reserved_bytes = max(0, self._workspace_reserved_bytes - reserved)
+            if self._workspace_used_bytes + self._workspace_reserved_bytes + actual > self.limits.max_workspace_bytes:
+                raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "PDF engine workspace quota exceeded")
+            self._workspace_used_bytes += actual
+
+    def _release_workspace(self, amount: int) -> None:
+        if amount <= 0:
+            return
+        with self._lock:
+            self._workspace_used_bytes = max(0, self._workspace_used_bytes - int(amount))
+
+    def workspace_status(self) -> dict:
+        with self._lock:
+            return {
+                "used_bytes": self._workspace_used_bytes,
+                "reserved_bytes": self._workspace_reserved_bytes,
+                "limit_bytes": self.limits.max_workspace_bytes,
+                "input_handles": len(self._inputs),
+                "output_handles": len(self._outputs),
+                "analyses": len(self._analyses),
+                "preview_artifacts": len(self._artifacts),
+            }
 
     def _operation_dir(self, prefix: str) -> Path:
         self._ensure_open()
@@ -242,7 +319,7 @@ class EngineClient:
     def create_operation(self, operation: str) -> str:
         """Create a cancellable operation handle for a future engine call."""
         self._ensure_open()
-        if operation not in {"audit", "preview", "export", "probe"}:
+        if operation not in {"audit", "preview", "export", "probe", "search", "extract_text"}:
             raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid operation type")
         operation_id = uuid.uuid4().hex
         with self._lock:
@@ -285,6 +362,10 @@ class EngineClient:
             is_output = value in self._outputs
             is_input = value in self._inputs
             is_analysis = value in self._analyses
+            is_artifact = value in self._artifacts
+        if is_artifact:
+            self.close_artifact(value)
+            return True
         if is_analysis:
             self.close_analysis(value)
             return True
@@ -407,16 +488,34 @@ class EngineClient:
     def api_info(self) -> dict:
         return {
             "api_version": ENGINE_API_VERSION,
-            "operations": ["register_input", "audit", "preview", "register_output", "export", "cancel", "release"],
+            "operations": ["register_input", "audit", "preview", "read_artifact", "search", "extract_text", "register_output", "export", "cancel", "release"],
             "error_codes": [value for name, value in vars(EngineErrorCode).items() if name.isupper()],
+            "limits": {
+                "max_input_bytes": self.limits.max_input_bytes,
+                "max_output_bytes": self.limits.max_output_bytes,
+                "max_pages": self.limits.max_pages,
+                "max_preview_pixels": self.limits.max_preview_pixels,
+                "worker_max_rss_mb": self.limits.worker_max_rss_mb,
+                "audit_timeout": self.limits.audit_timeout,
+                "preview_timeout": self.limits.preview_timeout,
+                "export_timeout": self.limits.export_timeout,
+                "max_workspace_bytes": self.limits.max_workspace_bytes,
+                "max_input_handles": self.limits.max_input_handles,
+                "max_output_handles": self.limits.max_output_handles,
+                "max_analyses": self.limits.max_analyses,
+                "max_preview_artifacts": self.limits.max_preview_artifacts,
+            },
         }
 
     def register_input(self, input_path: str | Path) -> str:
         """Copy a user-selected PDF into immutable engine-owned staging."""
         src = self.validate_input(input_path)
         size = src.stat().st_size
-        if directory_size(self._temp_root) + size > self.limits.max_workspace_bytes:
-            raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "PDF engine workspace quota exceeded")
+        with self._lock:
+            if len(self._inputs) >= self.limits.max_input_handles:
+                raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "input handle limit exceeded")
+        reservation = self._reserve_workspace(size)
+        committed = False
         try:
             ensure_free_space(self._input_root, size, min_free_bytes=self.limits.min_free_bytes)
         except OSError as exc:
@@ -445,10 +544,19 @@ class EngineClient:
                 os.chmod(staged, 0o400)
             except OSError:
                 pass
+            actual = staged.stat().st_size
+            self._commit_workspace_reservation(reservation, actual)
+            committed = True
             with self._lock:
-                self._inputs[handle] = {"path": staged, "size": size}
+                if len(self._inputs) >= self.limits.max_input_handles:
+                    self._release_workspace(actual)
+                    committed = False
+                    raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "input handle limit exceeded")
+                self._inputs[handle] = {"path": staged, "size": actual}
             return handle
         except BaseException as exc:
+            if not committed:
+                self._cancel_workspace_reservation(reservation)
             staged.unlink(missing_ok=True)
             if isinstance(exc, EngineError):
                 raise
@@ -469,6 +577,7 @@ class EngineClient:
             except OSError:
                 pass
             item["path"].unlink(missing_ok=True)
+            self._release_workspace(item.get("size", 0))
 
     def register_output(self, output_path: str | Path) -> str:
         """Authorize exactly one concrete user-selected destination path."""
@@ -482,6 +591,8 @@ class EngineClient:
             raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "output path is not a regular file destination")
         handle = uuid.uuid4().hex
         with self._lock:
+            if len(self._outputs) >= self.limits.max_output_handles:
+                raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "output handle limit exceeded")
             self._outputs[handle] = output
         return handle
 
@@ -511,6 +622,7 @@ class EngineClient:
 
     def probe(self, *, operation_id: str | None = None) -> dict:
         op_id, cancel_event, owned = self._operation("probe", operation_id)
+        reservation = self._reserve_workspace(self.limits.max_result_bytes)
         work = self._operation_dir("probe-")
         result = work / "result.json"
         try:
@@ -520,21 +632,57 @@ class EngineClient:
             return {"api_version": ENGINE_API_VERSION, **data}
         finally:
             shutil.rmtree(work, ignore_errors=True)
+            self._cancel_workspace_reservation(reservation)
             self._finish_operation(op_id, owned)
 
-    def audit(self, input_handle: str, *, operation_id: str | None = None) -> AnalysisResult:
+    def _normalize_detection_rules(self, rules: dict | None) -> dict:
+        raw = rules or {}
+        if not isinstance(raw, dict):
+            raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "detection_rules must be an object")
+        try:
+            values = {
+                "darkness_threshold": float(raw.get("darkness_threshold", 0.15)),
+                "min_width": float(raw.get("min_width", 10.0)),
+                "min_height": float(raw.get("min_height", 5.0)),
+                "word_overlap_threshold": float(raw.get("word_overlap_threshold", 0.5)),
+            }
+        except (TypeError, ValueError) as exc:
+            raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid detection rules") from exc
+        if not (0 <= values["darkness_threshold"] <= 1):
+            raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "darkness_threshold must be between 0 and 1")
+        if not (0 <= values["min_width"] <= 5000 and 0 <= values["min_height"] <= 5000):
+            raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "minimum dimensions are out of range")
+        if not (0.01 <= values["word_overlap_threshold"] <= 1):
+            raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "word_overlap_threshold must be between 0.01 and 1")
+        return values
+
+    def audit(self, input_handle: str, *, detection_rules: dict | None = None, operation_id: str | None = None) -> AnalysisResult:
         op_id, cancel_event, owned = self._operation("audit", operation_id)
         work: Path | None = None
+        reservation = 0
+        slot_reserved = False
+        committed = False
         try:
+            with self._lock:
+                if len(self._analyses) + self._reserved_analysis_slots >= self.limits.max_analyses:
+                    raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "analysis handle limit exceeded")
+                self._reserved_analysis_slots += 1
+                slot_reserved = True
+            reservation = self._reserve_workspace(self.limits.max_result_bytes * 2)
             self._emit_progress(op_id, "audit", "starting")
             src = self._input_for(input_handle)
             work = self._operation_dir("analysis-")
             result = work / "worker-result.json"
+            rules = self._normalize_detection_rules(detection_rules)
             data = self._run(
                 [
                     "audit", "--input", str(src),
                     "--max-pages", str(self.limits.max_pages),
                     "--max-input-bytes", str(self.limits.max_input_bytes),
+                    "--darkness-threshold", str(rules["darkness_threshold"]),
+                    "--min-width", str(rules["min_width"]),
+                    "--min-height", str(rules["min_height"]),
+                    "--word-overlap-threshold", str(rules["word_overlap_threshold"]),
                 ],
                 result,
                 self.limits.audit_timeout, operation_id=op_id, operation="audit", cancel_event=cancel_event,
@@ -547,17 +695,30 @@ class EngineClient:
             except OSError:
                 pass
             result.unlink(missing_ok=True)
+            actual_size = directory_size(work)
+            self._commit_workspace_reservation(reservation, actual_size)
+            committed = True
             analysis_id = uuid.uuid4().hex
             with self._lock:
+                self._reserved_analysis_slots = max(0, self._reserved_analysis_slots - 1)
+                slot_reserved = False
                 self._analyses[analysis_id] = {
                     "dir": work,
                     "stats": stats_path,
                     "input_handle": input_handle,
                     "pages": int(data["pages"]),
+                    "integrity": data.get("integrity", {}),
+                    "detection_rules": rules,
+                    "workspace_size": actual_size,
                 }
             self._emit_progress(op_id, "audit", "completed", int(data["pages"]), int(data["pages"]))
-            return AnalysisResult(analysis_id=analysis_id, pages=int(data["pages"]), stats=stats)
+            return AnalysisResult(analysis_id=analysis_id, pages=int(data["pages"]), stats=stats, integrity=data.get("integrity", {}))
         except BaseException as exc:
+            if slot_reserved:
+                with self._lock:
+                    self._reserved_analysis_slots = max(0, self._reserved_analysis_slots - 1)
+            if not committed and reservation:
+                self._cancel_workspace_reservation(reservation)
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
             if isinstance(exc, EngineError):
@@ -570,10 +731,15 @@ class EngineClient:
     def close_analysis(self, analysis_id: str | None) -> None:
         if not analysis_id:
             return
+        value = str(analysis_id)
         with self._lock:
-            item = self._analyses.pop(str(analysis_id), None)
+            item = self._analyses.pop(value, None)
+            artifact_handles = [h for h, a in self._artifacts.items() if a.get("analysis_id") == value]
+        for artifact_handle in artifact_handles:
+            self.close_artifact(artifact_handle)
         if item:
             shutil.rmtree(item["dir"], ignore_errors=True)
+            self._release_workspace(item.get("workspace_size", 0))
 
     def _analysis_for(self, analysis_id: str) -> dict:
         if not isinstance(analysis_id, str) or len(analysis_id) != 32:
@@ -592,10 +758,18 @@ class EngineClient:
         page: int,
         kind: str,
         remove: str,
+        rotate: int = 0,
+        search_query: str = "",
+        highlight_findings: bool = False,
+        focus_box: list[float] | tuple[float, float, float, float] | None = None,
         operation_id: str | None = None,
-    ) -> Path:
+    ) -> ArtifactResult:
         op_id, cancel_event, owned = self._operation("preview", operation_id)
         work: Path | None = None
+        reservation = 0
+        slot_reserved = False
+        committed = False
+        output: Path | None = None
         try:
             self._emit_progress(op_id, "preview", "starting")
             analysis = self._analysis_for(analysis_id)
@@ -606,7 +780,19 @@ class EngineClient:
                 raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid preview kind")
             if remove not in {"redactions", "all-annotations"}:
                 raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid annotation removal mode")
-            ensure_free_space(self._temp_root, 16 * _MIB, min_free_bytes=self.limits.min_free_bytes)
+            if rotate not in {0, 90, 180, 270}:
+                raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid preview rotation")
+            if not isinstance(search_query, str) or len(search_query) > 256:
+                raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid preview search query")
+            with self._lock:
+                if len(self._artifacts) + self._reserved_preview_slots >= self.limits.max_preview_artifacts:
+                    raise EngineError(EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED, "preview artifact limit exceeded")
+                self._reserved_preview_slots += 1
+                slot_reserved = True
+            # Reserve enough space for a worst-case RGBA render plus the bounded worker result.
+            preview_budget = self.limits.max_preview_pixels * 4 + self.limits.max_result_bytes
+            reservation = self._reserve_workspace(preview_budget)
+            ensure_free_space(self._temp_root, min(preview_budget, 128 * _MIB), min_free_bytes=self.limits.min_free_bytes)
             output = Path(analysis["dir"]) / f"preview-{uuid.uuid4().hex}.png"
             work = self._operation_dir("preview-op-")
             result = work / "result.json"
@@ -617,14 +803,104 @@ class EngineClient:
                     "--remove", remove, "--max-pixels", str(self.limits.max_preview_pixels),
                     "--max-pages", str(self.limits.max_pages),
                     "--max-input-bytes", str(self.limits.max_input_bytes),
+                    "--rotate", str(rotate),
+                    "--search-query", search_query,
+                    *( ["--highlight-findings"] if highlight_findings else [] ),
+                    *( ["--focus-box", ",".join(str(float(v)) for v in focus_box)] if focus_box is not None else [] ),
                 ],
                 result,
                 self.limits.preview_timeout, operation_id=op_id, operation="preview", cancel_event=cancel_event,
             )
             if not output.is_file():
                 raise EngineError(EngineErrorCode.EXPORT_FAILED, "preview was not generated")
+            size = output.stat().st_size
+            self._commit_workspace_reservation(reservation, size)
+            committed = True
+            artifact_handle = uuid.uuid4().hex
+            with self._lock:
+                self._reserved_preview_slots = max(0, self._reserved_preview_slots - 1)
+                slot_reserved = False
+                self._artifacts[artifact_handle] = {
+                    "path": output,
+                    "size": size,
+                    "mime": "image/png",
+                    "analysis_id": analysis_id,
+                }
             self._emit_progress(op_id, "preview", "completed", page, analysis["pages"])
-            return output
+            return ArtifactResult(artifact_handle=artifact_handle, mime="image/png", size=size)
+        except BaseException as exc:
+            if slot_reserved:
+                with self._lock:
+                    self._reserved_preview_slots = max(0, self._reserved_preview_slots - 1)
+            if not committed and reservation:
+                self._cancel_workspace_reservation(reservation)
+            if output is not None and not committed:
+                output.unlink(missing_ok=True)
+            if isinstance(exc, EngineError):
+                raise
+            self._raise_stable(exc)
+            raise AssertionError("unreachable")
+        finally:
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+            self._finish_operation(op_id, owned)
+
+    def read_artifact(self, artifact_handle: str) -> bytes:
+        if not isinstance(artifact_handle, str) or len(artifact_handle) != 32:
+            raise EngineError(EngineErrorCode.HANDLE_UNAVAILABLE, "invalid artifact handle")
+        with self._lock:
+            item = self._artifacts.get(artifact_handle)
+        if not item or not item["path"].is_file():
+            raise EngineError(EngineErrorCode.HANDLE_UNAVAILABLE, "artifact handle is unavailable")
+        data = item["path"].read_bytes()
+        if len(data) != item["size"]:
+            raise EngineError(EngineErrorCode.HANDLE_UNAVAILABLE, "artifact changed unexpectedly")
+        return data
+
+    def artifact_info(self, artifact_handle: str) -> dict:
+        if not isinstance(artifact_handle, str) or len(artifact_handle) != 32:
+            raise EngineError(EngineErrorCode.HANDLE_UNAVAILABLE, "invalid artifact handle")
+        with self._lock:
+            item = self._artifacts.get(artifact_handle)
+            if not item:
+                raise EngineError(EngineErrorCode.HANDLE_UNAVAILABLE, "artifact handle is unavailable")
+            return {
+                "api_version": ENGINE_API_VERSION,
+                "artifact_handle": artifact_handle,
+                "mime": item["mime"],
+                "size": item["size"],
+            }
+
+    def close_artifact(self, artifact_handle: str | None) -> None:
+        if not artifact_handle:
+            return
+        with self._lock:
+            item = self._artifacts.pop(str(artifact_handle), None)
+        if item:
+            item["path"].unlink(missing_ok=True)
+            self._release_workspace(item.get("size", 0))
+
+    def search(self, analysis_id: str, query: str, *, operation_id: str | None = None) -> dict:
+        op_id, cancel_event, owned = self._operation("search", operation_id)
+        work: Path | None = None
+        try:
+            analysis = self._analysis_for(analysis_id)
+            src = self._input_for(analysis["input_handle"])
+            query = str(query or "").strip()
+            if not query or len(query) > 256:
+                raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid search query")
+            reservation = self._reserve_workspace(self.limits.max_result_bytes)
+            work = self._operation_dir("search-")
+            result = work / "result.json"
+            self._emit_progress(op_id, "search", "starting")
+            data = self._run([
+                "search", "--input", str(src), "--query", query,
+                "--max-pages", str(self.limits.max_pages),
+                "--max-input-bytes", str(self.limits.max_input_bytes),
+                "--max-matches", "2000",
+            ], result, self.limits.audit_timeout, operation_id=op_id, operation="search", cancel_event=cancel_event)
+            self._emit_progress(op_id, "search", "completed", len(data.get("matches", [])), len(data.get("matches", [])))
+            return {"api_version": ENGINE_API_VERSION, **data}
         except BaseException as exc:
             if isinstance(exc, EngineError):
                 raise
@@ -633,6 +909,36 @@ class EngineClient:
         finally:
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
+            if 'reservation' in locals():
+                self._cancel_workspace_reservation(reservation)
+            self._finish_operation(op_id, owned)
+
+    def extract_text(self, analysis_id: str, *, operation_id: str | None = None) -> dict:
+        op_id, cancel_event, owned = self._operation("extract_text", operation_id)
+        work: Path | None = None
+        try:
+            analysis = self._analysis_for(analysis_id)
+            src = self._input_for(analysis["input_handle"])
+            reservation = self._reserve_workspace(self.limits.max_result_bytes)
+            work = self._operation_dir("extract-")
+            result = work / "result.json"
+            self._emit_progress(op_id, "extract_text", "starting")
+            data = self._run([
+                "extract-text", "--input", str(src), "--stats", str(analysis["stats"]),
+                "--max-input-bytes", str(self.limits.max_input_bytes),
+            ], result, self.limits.audit_timeout, operation_id=op_id, operation="extract_text", cancel_event=cancel_event)
+            self._emit_progress(op_id, "extract_text", "completed", len(data.get("entries", [])), len(data.get("entries", [])))
+            return {"api_version": ENGINE_API_VERSION, **data}
+        except BaseException as exc:
+            if isinstance(exc, EngineError):
+                raise
+            self._raise_stable(exc)
+            raise AssertionError("unreachable")
+        finally:
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+            if 'reservation' in locals():
+                self._cancel_workspace_reservation(reservation)
             self._finish_operation(op_id, owned)
 
     def export(
@@ -643,12 +949,16 @@ class EngineClient:
         mode: str,
         remove: str,
         sanitize_active_content: bool = True,
+        analysis_id: str | None = None,
+        only_pages_with_findings: bool = False,
         operation_id: str | None = None,
     ) -> dict:
         op_id, cancel_event, owned = self._operation("export", operation_id)
         temp_output: Path | None = None
         work: Path | None = None
+        reservation = 0
         try:
+            reservation = self._reserve_workspace(self.limits.max_result_bytes)
             self._emit_progress(op_id, "export", "starting")
             src = self._input_for(input_handle)
             output = self._output_for(output_handle)
@@ -658,6 +968,20 @@ class EngineClient:
                 raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "invalid annotation removal mode")
             if not isinstance(sanitize_active_content, bool):
                 raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "sanitize_active_content must be a boolean")
+            page_numbers = None
+            rules = self._normalize_detection_rules(None)
+            if analysis_id is not None:
+                analysis = self._analysis_for(analysis_id)
+                if analysis["input_handle"] != input_handle:
+                    raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "analysis does not belong to this input")
+                rules = analysis.get("detection_rules", rules)
+                if only_pages_with_findings:
+                    stats_payload = __import__("json").loads(Path(analysis["stats"]).read_text(encoding="utf-8"))
+                    page_numbers = sorted({int(item["page"]) for item in stats_payload.get("findings", [])})
+                    if not page_numbers:
+                        raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "no pages with findings to export")
+            elif only_pages_with_findings:
+                raise EngineError(EngineErrorCode.INVALID_ARGUMENT, "analysis_id is required for findings-only export")
 
             expected_growth = min(self.limits.max_output_bytes, max(64 * _MIB, src.stat().st_size * 3))
             ensure_free_space(output.parent, expected_growth, min_free_bytes=self.limits.min_free_bytes)
@@ -674,7 +998,13 @@ class EngineClient:
                 "--max-pages", str(self.limits.max_pages),
                 "--max-input-bytes", str(self.limits.max_input_bytes),
                 "--max-output-bytes", str(self.limits.max_output_bytes),
+                "--darkness-threshold", str(rules["darkness_threshold"]),
+                "--min-width", str(rules["min_width"]),
+                "--min-height", str(rules["min_height"]),
+                "--word-overlap-threshold", str(rules["word_overlap_threshold"]),
             ]
+            if page_numbers is not None:
+                args.extend(["--pages", ",".join(str(p) for p in page_numbers)])
             args.append("--sanitize-active-content" if sanitize_active_content else "--no-sanitize-active-content")
             data = self._run(args, result, self.limits.export_timeout, operation_id=op_id, operation="export", cancel_event=cancel_event)
             self._emit_progress(op_id, "export", "verifying")
@@ -698,5 +1028,7 @@ class EngineClient:
                 temp_output.unlink(missing_ok=True)
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
+            if reservation:
+                self._cancel_workspace_reservation(reservation)
             self._finish_operation(op_id, owned)
 

@@ -69,6 +69,14 @@ WORKSPACE_RESERVED_JOBS = 0
 BROWSER_PROFILES: set[str] = set()
 BROWSER_PROFILES_LOCK = threading.Lock()
 SHUTTING_DOWN = False
+PROGRESS: dict[str, dict] = {}
+PROGRESS_ALIASES: dict[str, str] = {}
+PROGRESS_LOCK = threading.RLock()
+
+def _engine_progress(event):
+    with PROGRESS_LOCK:
+        key = PROGRESS_ALIASES.get(event.operation_id, event.operation_id)
+        PROGRESS[key] = event.to_dict()
 
 logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, format="[%(levelname)s] %(message)s")
 LOG = logging.getLogger("pdf-unredact")
@@ -77,6 +85,7 @@ ENGINE = EngineClient(
     concurrency_guard=PDF_TASKS,
     log_debug=(lambda msg: LOG.debug("worker stderr: %s", msg)) if DEBUG else None,
     log_error=lambda msg: LOG.error("%s", msg),
+    progress_callback=_engine_progress,
 )
 
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#17191c"/><text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="white">PU</text></svg>'
@@ -188,37 +197,77 @@ def _job(job_id):
         return JOBS.get(job_id)
 
 
+def _progress_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = str(value).replace("-", "").lower()
+    return value if len(value) == 32 and all(c in "0123456789abcdef" for c in value) else None
+
+
+def _run_engine_operation(kind: str, client_progress_id: str | None, callback):
+    op_id = ENGINE.create_operation(kind)
+    progress_id = _progress_id(client_progress_id)
+    if progress_id:
+        with PROGRESS_LOCK:
+            PROGRESS_ALIASES[op_id] = progress_id
+            PROGRESS[progress_id] = {"operation": kind, "phase": "queued", "current": None, "total": None}
+    try:
+        return callback(op_id)
+    finally:
+        ENGINE.close_operation(op_id)
+        with PROGRESS_LOCK:
+            PROGRESS_ALIASES.pop(op_id, None)
+
+
+def _detection_rules_from(data: dict | None) -> dict:
+    data = data or {}
+    return {
+        "darkness_threshold": data.get("darkness_threshold", 0.15),
+        "min_width": data.get("min_width", 10.0),
+        "min_height": data.get("min_height", 5.0),
+        "word_overlap_threshold": data.get("word_overlap_threshold", 0.5),
+    }
+
+
 def _probe_worker() -> None:
     ENGINE.probe()
 
 
-def _audit_pdf(input_handle: str) -> tuple[int, dict, str]:
-    analysis = ENGINE.audit(input_handle)
-    return analysis.pages, analysis.stats, analysis.analysis_id
+def _audit_pdf(input_handle: str, detection_rules=None, progress_id=None) -> tuple[int, dict, str, dict]:
+    started = time.monotonic()
+    analysis = _run_engine_operation("audit", progress_id, lambda op: ENGINE.audit(input_handle, detection_rules=detection_rules, operation_id=op))
+    return analysis.pages, analysis.stats, analysis.analysis_id, {**(analysis.integrity or {}), "analysis_seconds": round(time.monotonic() - started, 3)}
 
 
-def _render_preview_worker(meta: dict, page_number: int, kind: str, remove_mode: str) -> Path:
-    token = uuid.uuid4().hex
-    return ENGINE.preview(
+def _render_preview_worker(meta: dict, page_number: int, kind: str, remove_mode: str, *, rotate=0, search_query="", highlight_findings=False, focus_box=None, progress_id=None):
+    return _run_engine_operation("preview", progress_id, lambda op: ENGINE.preview(
         analysis_id=meta["analysis_id"],
         page=page_number,
         kind=kind,
         remove=remove_mode,
-    )
+        rotate=rotate,
+        search_query=search_query,
+        highlight_findings=highlight_findings,
+        focus_box=focus_box,
+        operation_id=op,
+    ))
 
 
 def _export_pdf_worker(
-    meta: dict, output: str, mode: str, remove: str, sanitize_active_content: bool
+    meta: dict, output: str, mode: str, remove: str, sanitize_active_content: bool, *, only_pages_with_findings=False, progress_id=None
 ) -> dict:
     output_handle = ENGINE.register_output(output)
     try:
-        return ENGINE.export(
+        return _run_engine_operation("export", progress_id, lambda op: ENGINE.export(
             input_handle=meta["input_handle"],
             output_handle=output_handle,
             mode=mode,
             remove=remove,
             sanitize_active_content=sanitize_active_content,
-        )
+            analysis_id=meta.get("analysis_id"),
+            only_pages_with_findings=only_pages_with_findings,
+            operation_id=op,
+        ))
     finally:
         ENGINE.close_output(output_handle)
 
@@ -324,29 +373,50 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _send(self, status, body=b"", content_type="text/plain; charset=utf-8", headers=None):
-        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body)))
-        for k, v in self._security_headers().items(): self.send_header(k, v)
-        if headers:
-            for k, v in headers.items(): self.send_header(k, v)
-        self.end_headers()
-        if body: self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            for k, v in self._security_headers().items():
+                self.send_header(k, v)
+            if headers:
+                for k, v in headers.items():
+                    self.send_header(k, v)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Browsers routinely abort superseded preview/download requests.
+            # Treat this as a normal disconnect, not an application failure.
+            return
 
     def _send_file(self, status, path: Path, content_type: str, headers=None, delete_after=False):
         if not path.is_file():
-            self._json(404, {"error": _message("file_unavailable", self._lang())}); return
-        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(path.stat().st_size))
-        for k, v in self._security_headers().items(): self.send_header(k, v)
-        if headers:
-            for k, v in headers.items(): self.send_header(k, v)
-        self.end_headers()
+            self._json(404, {"error": _message("file_unavailable", self._lang())})
+            return
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            for k, v in self._security_headers().items():
+                self.send_header(k, v)
+            if headers:
+                for k, v in headers.items():
+                    self.send_header(k, v)
+            self.end_headers()
             with path.open("rb") as f:
                 while True:
                     chunk = f.read(1024 * 1024)
-                    if not chunk: break
+                    if not chunk:
+                        break
                     self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # A cancelled navigation/download closes the client socket while
+            # the local server may still be producing or streaming the reply.
+            return
         finally:
-            if delete_after: path.unlink(missing_ok=True)
+            if delete_after:
+                path.unlink(missing_ok=True)
 
     def _json(self, status, obj):
         self._send(status, _json_bytes(obj), "application/json; charset=utf-8")
@@ -387,6 +457,38 @@ class Handler(BaseHTTPRequestHandler):
             requested = path.rsplit("/", 1)[-1].lower()
             if requested not in {"it", "en"}: self._json(404, {"error": _message("not_found", self._lang(parsed))}); return
             self._json(200, frontend_catalog(requested)); return
+        if path.startswith("/api/progress/"):
+            progress_id = _progress_id(path.rsplit("/", 1)[-1])
+            if not progress_id: self._json(404, {"error": _message("not_found", self._lang(parsed))}); return
+            with PROGRESS_LOCK: payload = dict(PROGRESS.get(progress_id, {"phase": "waiting"}))
+            self._json(200, payload); return
+        if path.startswith("/api/diagnostics/"):
+            parts = path.strip("/").split("/"); meta = _job(parts[-1]) if len(parts) == 3 else None
+            if not meta: self._json(404, {"error": _message("job_not_found", self._lang(parsed))}); return
+            try:
+                probe = ENGINE.probe()
+                self._json(200, {"engine": ENGINE.api_info(), "workspace": ENGINE.workspace_status(), "probe": probe, "pages": meta["pages"], "integrity": meta.get("integrity", {}), "timings": meta.get("timings", {})})
+            except Exception as exc: self._safe_failure(exc, self._lang(parsed))
+            return
+        if path.startswith("/api/recovered-text/"):
+            parts = path.strip("/").split("/")
+            if len(parts) != 4: self._json(404, {"error": _message("not_found", self._lang(parsed))}); return
+            _, _, job_id, fmt = parts; meta = _job(job_id)
+            if not meta or fmt not in {"txt", "json", "csv"}: self._json(404, {"error": _message("job_not_found", self._lang(parsed))}); return
+            try:
+                data = ENGINE.extract_text(meta["analysis_id"]); entries = data.get("entries", [])
+                stem = Path(meta["filename"]).stem + "_recovered"
+                if fmt == "json":
+                    body = json.dumps(entries, ensure_ascii=False, indent=2).encode("utf-8"); content_type="application/json; charset=utf-8"
+                elif fmt == "csv":
+                    import csv, io
+                    out = io.StringIO(); writer = csv.writer(out); writer.writerow(["page","source","x0","y0","x1","y1","text"])
+                    for item in entries: writer.writerow([item["page"], item["source"], *item["box"], item["text"]])
+                    body = out.getvalue().encode("utf-8"); content_type="text/csv; charset=utf-8"
+                else:
+                    body = ("\n".join(f'[Page {item["page"]}] {item["text"]}' for item in entries) + ("\n" if entries else "")).encode("utf-8"); content_type="text/plain; charset=utf-8"
+                self._send(200, body, content_type, {"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'}); return
+            except Exception as exc: self._safe_failure(exc, self._lang(parsed)); return
         if path.startswith("/api/preview/"):
             parts = path.strip("/").split("/")
             if len(parts) != 5: self._json(404, {"error": _message("invalid_endpoint", self._lang(parsed))}); return
@@ -395,10 +497,27 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 page_no = int(page_text)
                 if not 1 <= page_no <= meta["pages"]: raise ValueError("invalid page")
-                remove_mode = urllib.parse.parse_qs(parsed.query).get("remove", ["redactions"])[0]
+                query = urllib.parse.parse_qs(parsed.query)
+                remove_mode = query.get("remove", ["redactions"])[0]
                 if remove_mode not in {"redactions", "all-annotations"}: remove_mode = "redactions"
+                rotate = int(query.get("rotate", ["0"])[0]); rotate = rotate if rotate in {0,90,180,270} else 0
+                search_query = query.get("search", [""])[0][:256]
+                highlight_findings = query.get("highlight", ["0"])[0] == "1"
+                focus_box = None
+                if query.get("focus"):
+                    try:
+                        values = [float(v) for v in query["focus"][0].split(",")]; focus_box = values if len(values)==4 else None
+                    except ValueError: pass
+                progress_id = query.get("progress", [None])[0]
                 with meta["lock"]:
-                    png = _render_preview_worker(meta, page_no, kind, remove_mode); self._send_file(200, png, "image/png", delete_after=True)
+                    started = time.monotonic()
+                    artifact = _render_preview_worker(meta, page_no, kind, remove_mode, rotate=rotate, search_query=search_query, highlight_findings=highlight_findings, focus_box=focus_box, progress_id=progress_id)
+                    meta.setdefault("timings", {})["preview_seconds"] = round(time.monotonic() - started, 3)
+                    try:
+                        body = ENGINE.read_artifact(artifact.artifact_handle)
+                        self._send(200, body, artifact.mime)
+                    finally:
+                        ENGINE.release(artifact.artifact_handle)
             except Exception as exc: self._safe_failure(exc, self._lang(parsed))
             return
         if path.startswith("/api/report/"):
@@ -422,6 +541,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         if not self._request_allowed(require_session=True, require_origin=True): return
+        if parsed.path.startswith("/api/search/"):
+            parts = parsed.path.strip("/").split("/"); meta = _job(parts[-1]) if len(parts) == 3 else None
+            if not meta: self._json(404, {"error": _message("job_not_found", self._lang(parsed))}); return
+            try:
+                data = self._read_json_body(); query = str(data.get("query", "")).strip()
+                result = ENGINE.search(meta["analysis_id"], query)
+                self._json(200, result)
+            except Exception as exc: self._safe_failure(exc, self._lang(parsed))
+            return
         if parsed.path == "/api/upload":
             lang = self._lang(parsed)
             try: length = int(self.headers.get("Content-Length", "0"))
@@ -446,11 +574,12 @@ class Handler(BaseHTTPRequestHandler):
                 if first != b"%PDF-": raise ValueError("invalid PDF signature")
                 input_handle = ENGINE.register_input(input_path)
                 input_path.unlink(missing_ok=True)
-                pages, stats, analysis_id = _audit_pdf(input_handle)
-                meta = {"dir": str(job_dir), "input_handle": input_handle, "input_size": length, "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "analysis_id": analysis_id, "lock": threading.RLock()}
+                progress_id = self.headers.get("X-Progress-Id")
+                pages, stats, analysis_id, integrity = _audit_pdf(input_handle, progress_id=progress_id)
+                meta = {"dir": str(job_dir), "input_handle": input_handle, "input_size": length, "filename": filename, "pages": pages, "created": time.time(), "last_output": None, "stats": stats, "analysis_id": analysis_id, "integrity": integrity, "timings": {"analysis_seconds": integrity.get("analysis_seconds", 0)}, "lock": threading.RLock()}
                 with JOBS_LOCK: JOBS[job_id] = meta
                 _workspace_release(reserved, reserved_job=True); reserved = 0
-                self._json(200, {"job_id": job_id, "filename": filename, "pages": pages, "stats": stats})
+                self._json(200, {"job_id": job_id, "filename": filename, "pages": pages, "stats": stats, "integrity": integrity})
             except Exception as exc:
                 _workspace_release(reserved, reserved_job=True)
                 ENGINE.close_analysis(analysis_id)
@@ -463,14 +592,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with meta["lock"]:
                     old_analysis_id = meta.get("analysis_id")
-                    pages, stats, analysis_id = _audit_pdf(meta["input_handle"])
+                    data = self._read_json_body()
+                    rules = _detection_rules_from(data.get("detection_rules"))
+                    pages, stats, analysis_id, integrity = _audit_pdf(meta["input_handle"], rules, data.get("progress_id"))
                     if pages != meta["pages"]:
                         ENGINE.close_analysis(analysis_id)
                         raise RuntimeError("page count changed")
                     meta["stats"] = stats
                     meta["analysis_id"] = analysis_id
+                    meta["integrity"] = integrity
+                    meta.setdefault("timings", {})["analysis_seconds"] = integrity.get("analysis_seconds", 0)
                     ENGINE.close_analysis(old_analysis_id)
-                self._json(200, {"stats": stats})
+                self._json(200, {"stats": stats, "integrity": integrity})
             except Exception as exc: self._safe_failure(exc, self._lang(parsed))
             return
         if parsed.path == "/api/export":
@@ -478,6 +611,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = self._read_json_body(); job_id = str(data.get("job_id", "")); mode = data.get("mode", "clean"); remove = data.get("remove", "redactions")
                 sanitize_active_content = data.get("sanitize_active_content", True)
+                only_pages_with_findings = bool(data.get("only_pages_with_findings", False))
+                progress_id = data.get("progress_id")
                 if mode not in {"clean", "side_by_side"}: raise ValueError("invalid mode")
                 if remove not in {"redactions", "all-annotations"}: raise ValueError("invalid annotation option")
                 if not isinstance(sanitize_active_content, bool): raise ValueError("invalid sanitization option")
@@ -492,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with meta["lock"]:
                         output.unlink(missing_ok=True)
-                        result = _export_pdf_worker(meta, str(output), mode, remove, sanitize_active_content)
+                        started=time.monotonic(); result = _export_pdf_worker(meta, str(output), mode, remove, sanitize_active_content, only_pages_with_findings=only_pages_with_findings, progress_id=progress_id); meta.setdefault("timings", {})["export_seconds"] = round(time.monotonic()-started,3)
                         if not output.is_file(): raise RuntimeError("output file missing")
                         meta["last_output"] = str(output)
                 finally:

@@ -304,6 +304,126 @@ class SecurityHardeningTests(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_preview_returns_opaque_artifact_handle_and_release_removes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client = EngineClient()
+            try:
+                ih = client.register_input(self._fixture(root))
+                analysis = client.audit(ih)
+                artifact = client.preview(analysis_id=analysis.analysis_id, page=1, kind="clean", remove="redactions")
+                self.assertEqual(len(artifact.artifact_handle), 32)
+                self.assertEqual(artifact.mime, "image/png")
+                self.assertGreater(len(client.read_artifact(artifact.artifact_handle)), 0)
+                self.assertTrue(client.release(artifact.artifact_handle))
+                with self.assertRaises(EngineError) as ctx:
+                    client.read_artifact(artifact.artifact_handle)
+                self.assertEqual(ctx.exception.code, EngineErrorCode.HANDLE_UNAVAILABLE)
+            finally:
+                client.close()
+
+    def test_preview_artifact_limit_is_enforced_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client = EngineClient(limits=EngineLimits(max_preview_artifacts=1))
+            try:
+                ih = client.register_input(self._fixture(root))
+                analysis = client.audit(ih)
+                first = client.preview(analysis_id=analysis.analysis_id, page=1, kind="clean", remove="redactions")
+                with self.assertRaises(EngineError) as ctx:
+                    client.preview(analysis_id=analysis.analysis_id, page=1, kind="clean", remove="redactions")
+                self.assertEqual(ctx.exception.code, EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED)
+                client.release(first.artifact_handle)
+                second = client.preview(analysis_id=analysis.analysis_id, page=1, kind="clean", remove="redactions")
+                client.release(second.artifact_handle)
+            finally:
+                client.close()
+
+    def test_handle_and_analysis_limits_are_enforced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            client = EngineClient(limits=EngineLimits(max_input_handles=1, max_output_handles=1, max_analyses=1))
+            try:
+                ih = client.register_input(source)
+                with self.assertRaises(EngineError):
+                    client.register_input(source)
+                first_output = client.register_output(root / "a.pdf")
+                with self.assertRaises(EngineError):
+                    client.register_output(root / "b.pdf")
+                analysis = client.audit(ih)
+                with self.assertRaises(EngineError):
+                    client.audit(ih)
+                client.release(analysis.analysis_id)
+                analysis2 = client.audit(ih)
+                client.release(analysis2.analysis_id)
+                client.release(first_output)
+            finally:
+                client.close()
+
+    def test_concurrent_input_registration_cannot_overbook_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._fixture(root)
+            size = source.stat().st_size
+            client = EngineClient(limits=EngineLimits(max_workspace_bytes=size + 64, max_input_handles=4, min_free_bytes=0))
+            barrier = threading.Barrier(2)
+            results = []
+            original_validate = client.validate_input
+            def validate(path):
+                value = original_validate(path)
+                barrier.wait(timeout=2)
+                return value
+            try:
+                with mock.patch.object(client, "validate_input", side_effect=validate):
+                    threads = [threading.Thread(target=lambda: results.append(("ok", client.register_input(source))) if False else None) for _ in range(0)]
+                    def run():
+                        try:
+                            results.append(("ok", client.register_input(source)))
+                        except EngineError as exc:
+                            results.append((exc.code, None))
+                    threads = [threading.Thread(target=run) for _ in range(2)]
+                    for t in threads: t.start()
+                    for t in threads: t.join(3)
+                self.assertEqual(sum(1 for code, _ in results if code == "ok"), 1)
+                self.assertEqual(sum(1 for code, _ in results if code == EngineErrorCode.WORKSPACE_QUOTA_EXCEEDED), 1)
+            finally:
+                client.close()
+
+    def test_web_send_swallows_normal_client_disconnects(self):
+        import web_app
+
+        handler = object.__new__(web_app.Handler)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler._security_headers = mock.Mock(return_value={})
+        handler.end_headers = mock.Mock(side_effect=BrokenPipeError(32, "Broken pipe"))
+        handler.wfile = mock.Mock()
+
+        # A browser that closes before headers are flushed must not escape as an error.
+        handler._send(200, b"payload")
+
+        handler.end_headers = mock.Mock()
+        handler.wfile.write = mock.Mock(side_effect=ConnectionResetError(104, "reset"))
+        handler._send(200, b"payload")
+
+    def test_web_send_file_swallows_disconnect_and_still_deletes_temporary_file(self):
+        import web_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "preview.png"
+            path.write_bytes(b"x" * 32)
+            handler = object.__new__(web_app.Handler)
+            handler.send_response = mock.Mock()
+            handler.send_header = mock.Mock()
+            handler._security_headers = mock.Mock(return_value={})
+            handler.end_headers = mock.Mock()
+            handler.wfile = mock.Mock()
+            handler.wfile.write = mock.Mock(side_effect=ConnectionAbortedError(103, "aborted"))
+
+            handler._send_file(200, path, "image/png", delete_after=True)
+            self.assertFalse(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

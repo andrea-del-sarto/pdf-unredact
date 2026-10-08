@@ -4,6 +4,65 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-10-08
+
+- Fixed the preview zoom indicator so it always shows the effective zoom level; the `+` / `−` controls support 25%–400%, while clicking the percentage resets to 100%.
+- Fixed preview zoom geometry: fit-to-page now respects the available viewport/pane height, fit-to-width is recalculated from the actual pane width, and +/- zoom continues smoothly from the current fitted size.
+- Moved page navigation controls onto the same toolbar row as PDF text search, keeping them vertically aligned with the search field.
+
+- Anteprima: `Adatta pagina` e `Adatta larghezza` ora usano uno stato visivo attivo, con larghezza fissa dei controlli per evitare spostamenti al cambio lingua.
+
+### Added
+
+- Added full-document text search with previous/next result navigation and visual highlighting in the preview.
+- Added preview zoom controls for zoom in/out, 100%, fit page, and fit width.
+- Added 90° left/right preview rotation without modifying the source PDF.
+- Added finding filters for recoverability, detection type, and page.
+- Added previous/next finding navigation with automatic preview centering on the selected area.
+- Added optional temporary finding highlighting in the preview.
+- Added an export option that keeps only pages containing detected findings.
+- Added recovered-text export in TXT, JSON, and CSV formats.
+- Added visible progress reporting for analysis, preview, and export, including verification and atomic commit phases.
+- Added PDF integrity reporting, including notification when MuPDF repairs a malformed document while opening it.
+- Added an optional diagnostics panel, hidden by default, exposing engine/runtime information, configured limits, document integrity information, and processing timings.
+- Added advanced detection rules for dark-fill threshold, minimum rectangle width/height, and minimum text-overlap ratio.
+
+### Changed
+
+- Preview generation now returns opaque artifact handles instead of exposing engine-owned temporary filesystem paths; the host reads and releases preview artifacts through `EngineClient`.
+- Engine workspace accounting is now atomic across concurrent operations and includes staged inputs, persisted analyses, preview artifacts, and bounded transient worker results.
+- Added explicit engine limits for input handles, output handles, analyses, and preview artifacts, with reservation slots preventing concurrent over-allocation.
+- La card **Apri PDF** viene nascosta dopo il caricamento riuscito del documento; il cambio file resta disponibile dalla card del documento.
+- Riordinata la colonna laterale: **Esporta → Formato di output → Annotazioni → Sicurezza → Regole di rilevamento avanzate**.
+
+- Updated the English and Italian localization catalogs for all 1.5.0 controls, statuses, diagnostics, integrity messages, and advanced-detection settings.
+- Kept preview-only operations such as zoom and rotation separate from PDF export, so visual inspection cannot alter the source or exported document unless an explicit export option requires it.
+
+### Compatibility
+
+- Preserves the 1.4.6 engine API, capability-handle model, atomic export, optional active-content sanitization, worker limits, fullscreen preview, and keyboard page navigation.
+
+### Fixed
+
+- Manual preview zoom above 100% now disables flex shrinking, so 125%–400% produces real enlargement with pane scrolling instead of being compressed back to the viewport.
+- Restored the top-right information and theme icons to the 1.4.6 fixed rendering.
+- Diagnostics toggle now reflects the active state (enable/disable).
+- Recovered-text TXT/JSON/CSV exports now use the native save-location dialog when supported, matching PDF export behavior.
+
+## [1.4.6] - 2026-10-05
+
+### Added
+
+- Added keyboard navigation in the preview: Left Arrow shows the previous PDF page and Right Arrow shows the next page, including while the preview is in full-screen mode. Keyboard navigation is ignored while typing in editable controls.
+
+### Changed
+
+- Updated the Italian and English preview descriptions to expose the new keyboard shortcuts.
+
+### Fixed
+
+- Treat normal browser disconnects during responses, previews, and downloads (`BrokenPipeError`, `ConnectionResetError`, `ConnectionAbortedError`) as expected client cancellation instead of printing server tracebacks.
+
 ## [1.4.5] - 2026-10-05
 
 ### Added

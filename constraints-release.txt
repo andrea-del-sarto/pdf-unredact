@@ -1,0 +1,4 @@
+# Release constraints for reproducible packaging of pdf-unredact 1.5.0
+# Keep in sync with pyproject.toml and the release test suite.
+pymupdf==1.26.7
+hatchling==1.27.0

@@ -1,5 +1,7 @@
 # pdf-unredact
 
+**Current release:** 1.5.0
+
 **Analyze PDF redactions, detect recoverable hidden text, and export cleaned documents without re-typesetting the original content.**
 
 `pdf-unredact` is a PDF redaction analysis and recovery tool designed for documents where text or page content may still exist underneath visual covers. It can inspect suspicious redactions, classify what is recoverable and removable, and export either a cleaned PDF or an original/cleaned side-by-side comparison.
@@ -18,6 +20,10 @@ Wherever possible, the project preserves the source PDF's native fonts, text obj
 - **Automatic redaction analysis** with detailed statistics
 - **JSON audit reports** for programmatic inspection
 - **Selective annotation removal** or full annotation removal
+- **Interactive preview** with search, zoom, rotation, full screen, and finding navigation
+- **Finding filters and temporary highlighting**
+- **Recovered-text export** in TXT, JSON, and CSV
+- **PDF integrity diagnostics and advanced detection rules**
 - **Page preview and findings table**
 - **Recoverable vs removable classification**
 - **Conservative content-stream rewriting** for supported dark rectangles
@@ -72,7 +78,18 @@ You can:
 - run automatic redaction analysis;
 - inspect analysis statistics;
 - download a detailed JSON report;
-- preview original and cleaned pages, with an optional full-screen comparison view;
+- preview original and cleaned pages, with an optional full-screen comparison view and Left/Right Arrow keyboard navigation;
+- search text across the PDF, navigate matching occurrences, and highlight matches in the preview;
+- zoom to 25–400%, reset to 100%, fit page, or fit width;
+- rotate the preview by 90° steps without altering the source or exported document;
+- filter findings by recoverability, source type, or page, and navigate directly between findings;
+- temporarily highlight detected areas in the preview;
+- export only pages that contain findings;
+- export recovered text as TXT, JSON, or CSV;
+- see real operation progress for analysis, preview generation, export verification, and atomic commit;
+- inspect PDF integrity and whether MuPDF repaired a malformed document while opening it;
+- open an optional diagnostics panel with PyMuPDF/Python versions, engine limits, and operation timings;
+- adjust advanced detection rules for darkness threshold, minimum rectangle dimensions, and text-overlap threshold;
 - inspect page-by-page finding details in a section collapsed by default;
 - manually refresh the analysis.
 
@@ -147,9 +164,11 @@ Since version **1.4.0**, the web host also uses:
 
 ### Isolated PDF processing
 
-Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.4**, `EngineClient` also uses opaque input/output capabilities, stages inputs into immutable private storage, and commits validated exports atomically. A future Tauri or Flutter frontend therefore does not receive worker paths or authorize its own filesystem roots.
+Untrusted PDF parsing is delegated to the same short-lived worker process for both web operations and CLI processing instead of being performed directly by the host process. Since **1.4.4**, `EngineClient` uses opaque input/output capabilities, stages inputs into immutable private storage, and commits validated exports atomically. In **1.5.0**, preview images also became opaque engine artifacts: frontends receive an artifact handle rather than a temporary filesystem path and must read/release it through the engine. Workspace reservations and handle/analysis/preview limits are enforced atomically across concurrent calls. A future Tauri or Flutter frontend therefore does not receive worker paths or authorize its own filesystem roots.
 
 Since **1.4.5**, the engine boundary is explicitly versioned (`ENGINE_API_VERSION = 1`). Long-running operations may use an opaque `operation_id` for cancellation, emit structured progress events, and fail with stable `EngineError.code` values instead of requiring a frontend to parse exception text. `release(handle)` provides a single idempotent lifecycle primitive for desktop bridges. The legacy web UI may continue using synchronous calls, while a Tauri/Flutter host can create operation handles before dispatching work from its own async/task layer.
+
+Since **1.5.0**, the same engine boundary also exposes search and recovered-text extraction operations. Detection rules are attached to an analysis handle and reused by export, while preview rotation and visual highlighting remain non-destructive. Findings-only export derives its page set from the engine-owned analysis rather than trusting a page list supplied by the frontend.
 
 Worker execution is bounded by:
 
