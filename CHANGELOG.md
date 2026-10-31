@@ -4,7 +4,24 @@ All notable changes to `pdf-unredact` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
-## [1.5.0] - 2026-10-08
+## [1.6.0] - 2026-10-31
+
+### Added
+
+- Added automatic document-structure classification focused on redaction recoverability.
+- Added detection of **flattened raster scans** where covered pixels are no longer present and therefore cannot be recovered from the PDF itself.
+- Added detection of **scanned PDFs with hidden OCR text layers** using raster-page coverage plus invisible PDF text-rendering evidence; these documents are reported as potentially recoverable when the OCR layer still contains the original text.
+- Added detection of **native/separate PDF content layers**, including redaction annotations and vector cover objects that remain structurally separate from underlying text.
+- Added per-page classification evidence: raster-image coverage, scan-like status, hidden OCR status, extracted text counts, and hidden-text counts.
+- Added document-structure information to engine audit integrity results and diagnostics.
+- Added localized Italian/English document-structure status in the UI, with detailed explanatory tooltips.
+
+### Changed
+
+- Document classification is intentionally conservative: a flattened scan is never labeled recoverable merely because visible surrounding text can be OCRed or inferred.
+- Mixed PDFs retain per-page evidence while the document-level category follows direct separate-layer evidence first, then the dominant page structure.
+
+## [1.5.0] - 2026-10-05
 
 - Fixed the preview zoom indicator so it always shows the effective zoom level; the `+` / `−` controls support 25%–400%, while clicking the percentage resets to 100%.
 - Fixed preview zoom geometry: fit-to-page now respects the available viewport/pane height, fit-to-width is recalculated from the actual pane width, and +/- zoom continues smoothly from the current fitted size.

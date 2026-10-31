@@ -38,3 +38,4 @@ select,.textInput,.pageInput{border:1px solid var(--line);background:var(--surfa
    Preview images are flex items: disable shrinking or the browser compresses
    125%+ widths back into the pane, making zoom appear capped at 100%. */
 .pane img{flex:0 0 auto;max-width:none;min-width:0;margin-left:auto;margin-right:auto}
+.structureLine{margin-top:5px;font-size:.82rem;color:var(--muted);line-height:1.35}.structureLine.ok{color:var(--ok)}.structureLine.warn{color:var(--warn)}

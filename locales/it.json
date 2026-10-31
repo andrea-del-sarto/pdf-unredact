@@ -124,7 +124,17 @@
     "text_download_error": "Impossibile salvare il testo recuperato.",
     "text_file_type": "Documento di testo",
     "json_file_type": "Documento JSON",
-    "csv_file_type": "Documento CSV"
+    "csv_file_type": "Documento CSV",
+    "document_structure": "Struttura documento",
+    "structure_flattened_scan": "Scansione appiattita",
+    "structure_flattened_scan_desc": "La pagina è principalmente un’immagine raster. Le informazioni coperte nei pixel non sono recuperabili dal PDF.",
+    "structure_hidden_ocr": "Scansione con OCR nascosto",
+    "structure_hidden_ocr_desc": "È presente un livello di testo invisibile. Le informazioni possono essere recuperabili se il livello OCR conserva il testo originale.",
+    "structure_separate_layers": "PDF con contenuti separati",
+    "structure_separate_layers_desc": "Testo, annotazioni o coperture vettoriali sono separati. Le informazioni possono essere recuperabili quando il contenuto sottostante è ancora presente.",
+    "structure_confidence": "Confidenza",
+    "structure_scan_pages": "Pagine scansione",
+    "structure_ocr_pages": "Pagine con OCR nascosto"
   },
   "backend": {
     "invalid_page": "Pagina non valida",

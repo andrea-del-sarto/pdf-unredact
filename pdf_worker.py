@@ -91,6 +91,7 @@ try:
         _candidate_from_dict,
         _clean_document,
         compute_redaction_stats,
+        classify_document_structure,
         extract_recovered_text,
         make_clean_pdf,
         make_side_by_side,
@@ -178,6 +179,8 @@ def cmd_audit(args) -> None:
     finally:
         doc.close()
     stats = compute_redaction_stats(str(input_path), _rules_from_args(args))
+    classification = classify_document_structure(str(input_path), stats)
+    integrity["document_structure"] = classification
     _write_json(args.result, {"ok": True, "pages": pages, "stats": stats.to_dict(), "integrity": integrity})
 
 

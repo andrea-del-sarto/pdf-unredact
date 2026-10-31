@@ -124,7 +124,17 @@
     "text_download_error": "Unable to save the recovered text.",
     "text_file_type": "Text document",
     "json_file_type": "JSON document",
-    "csv_file_type": "CSV document"
+    "csv_file_type": "CSV document",
+    "document_structure": "Document structure",
+    "structure_flattened_scan": "Flattened scan",
+    "structure_flattened_scan_desc": "The page is primarily a raster image. Information covered in the pixels cannot be recovered from the PDF.",
+    "structure_hidden_ocr": "Scan with hidden OCR",
+    "structure_hidden_ocr_desc": "An invisible text layer is present. Information may be recoverable if the OCR layer still contains the original text.",
+    "structure_separate_layers": "PDF with separate content layers",
+    "structure_separate_layers_desc": "Text, annotations, or vector covers are separate. Information may be recoverable when the underlying content is still present.",
+    "structure_confidence": "Confidence",
+    "structure_scan_pages": "Scan pages",
+    "structure_ocr_pages": "Pages with hidden OCR"
   },
   "backend": {
     "invalid_page": "Invalid page",

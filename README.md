@@ -1,6 +1,6 @@
 # pdf-unredact
 
-**Current release:** 1.5.0
+**Current release:** 1.6.0
 
 **Analyze PDF redactions, detect recoverable hidden text, and export cleaned documents without re-typesetting the original content.**
 
@@ -395,3 +395,13 @@ Parts of this fork were developed with AI-assisted coding tools ("vibe coding") 
 ## Release history
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release notes and version history.
+
+## Document structure classification (1.6.0)
+
+The audit now classifies the input PDF for recovery-relevant structure:
+
+- **Flattened scan** — pages are raster-image dominated and there is no evidence of a hidden OCR text layer. Text covered by black pixels is not recoverable from the PDF itself.
+- **Scan with hidden OCR** — pages are raster-image dominated but also contain invisible PDF text. Recovery may be possible when that OCR layer still contains the original information.
+- **PDF with separate content layers** — native text, redaction annotations, or vector covers remain separate. Recovery may be possible when the underlying content has not been removed.
+
+The classifier reports evidence rather than certainty. It includes per-page image coverage, hidden-text counts, OCR-layer evidence, and separate-overlay evidence. It does not invent or infer missing text from context.

@@ -262,6 +262,152 @@ def word_overlaps_box(word_bbox: BBox, box: BBox, overlap_threshold: float = 0.5
 
 
 
+def _rect_area(rect) -> float:
+    try:
+        r = pymupdf.Rect(rect)
+        return max(0.0, float(r.width)) * max(0.0, float(r.height))
+    except Exception:
+        return 0.0
+
+
+def _page_image_coverage(page) -> float:
+    """Estimate how much of a page is covered by raster images.
+
+    This is deliberately conservative: overlapping image bboxes are summed and
+    capped at the page area. It is intended for document-type classification,
+    not pixel-perfect geometry.
+    """
+    page_area = _rect_area(page.rect)
+    if page_area <= 0:
+        return 0.0
+    total = 0.0
+    try:
+        for info in page.get_image_info(xrefs=True):
+            bbox = info.get("bbox")
+            if bbox:
+                total += _rect_area(bbox)
+    except Exception:
+        return 0.0
+    return max(0.0, min(1.0, total / page_area))
+
+
+def _hidden_text_chars(page) -> int:
+    """Count characters rendered with PDF text rendering mode 3 (invisible).
+
+    OCR layers generated for scanned PDFs are commonly represented this way.
+    Failure to inspect the trace is treated as no evidence, never as proof that
+    an OCR layer is absent.
+    """
+    count = 0
+    try:
+        for span in page.get_texttrace():
+            if int(span.get("type", -1)) != 3:
+                continue
+            chars = span.get("chars") or []
+            count += len(chars)
+    except Exception:
+        return 0
+    return count
+
+
+def classify_document_structure(pdf_path: str, stats: RedactionStats | dict | None = None) -> dict:
+    """Classify a PDF into the three recovery-relevant document structures.
+
+    Categories:
+      * ``flattened_scan``: raster-dominant scan without evidence of hidden OCR;
+        blacked-out pixels are not recoverable from the PDF itself.
+      * ``scan_with_hidden_ocr``: raster-dominant scan with an invisible text
+        layer; covered information may be recoverable if that OCR layer still
+        contains the original text.
+      * ``separate_pdf_layers``: native/vector PDF or a PDF with separate
+        annotations / drawing objects; redactions may be removable when the
+        underlying content is still present.
+
+    The result is intentionally evidence-based and does not claim that every
+    redaction in a document is recoverable.
+    """
+    if isinstance(stats, RedactionStats):
+        stats_dict = stats.to_dict()
+    elif isinstance(stats, dict):
+        stats_dict = stats
+    else:
+        stats_dict = {}
+
+    findings = list(stats_dict.get("findings") or [])
+    has_separate_overlays = any(
+        str(item.get("source", "")).startswith("annotation:")
+        or str(item.get("source", "")) == "dark_rectangle"
+        for item in findings if isinstance(item, dict)
+    )
+
+    page_details = []
+    scan_pages = 0
+    hidden_ocr_pages = 0
+    total_hidden_chars = 0
+    total_text_chars = 0
+
+    doc = pymupdf.open(pdf_path)
+    try:
+        for index, page in enumerate(doc):
+            coverage = _page_image_coverage(page)
+            try:
+                text_chars = len((page.get_text("text") or "").strip())
+            except Exception:
+                text_chars = 0
+            hidden_chars = _hidden_text_chars(page)
+            # A page is scan-like when a raster image covers most of it.
+            scan_like = coverage >= 0.70
+            # Strong OCR evidence requires invisible PDF text, not merely text
+            # that an OCR engine might have extracted after flattening.
+            hidden_ocr = scan_like and hidden_chars >= 12
+            scan_pages += int(scan_like)
+            hidden_ocr_pages += int(hidden_ocr)
+            total_hidden_chars += hidden_chars
+            total_text_chars += text_chars
+            page_details.append({
+                "page": index + 1,
+                "image_coverage": round(coverage, 4),
+                "scan_like": scan_like,
+                "hidden_ocr": hidden_ocr,
+                "hidden_text_chars": hidden_chars,
+                "text_chars": text_chars,
+            })
+    finally:
+        doc.close()
+
+    pages = len(page_details)
+    scan_ratio = (scan_pages / pages) if pages else 0.0
+    # Separate annotations/drawings are direct structural evidence and take
+    # precedence even on an image-heavy page. Otherwise use the dominant page
+    # structure for document-level classification.
+    if has_separate_overlays or scan_ratio < 0.50:
+        category = "separate_pdf_layers"
+        recoverability = "potentially_recoverable"
+        confidence = "high" if has_separate_overlays else "medium"
+    elif hidden_ocr_pages > 0:
+        category = "scan_with_hidden_ocr"
+        recoverability = "potentially_recoverable"
+        confidence = "high" if hidden_ocr_pages >= max(1, scan_pages // 2) else "medium"
+    else:
+        category = "flattened_scan"
+        recoverability = "not_recoverable_from_pixels"
+        confidence = "high" if scan_ratio >= 0.80 else "medium"
+
+    return {
+        "category": category,
+        "recoverability": recoverability,
+        "confidence": confidence,
+        "pages": pages,
+        "scan_pages": scan_pages,
+        "hidden_ocr_pages": hidden_ocr_pages,
+        "scan_page_ratio": round(scan_ratio, 4),
+        "hidden_text_chars": total_hidden_chars,
+        "text_chars": total_text_chars,
+        "separate_overlay_evidence": bool(has_separate_overlays),
+        "page_details": page_details,
+    }
+
+
 @dataclass
 class CleanResult:
     annotations_removed: int = 0
