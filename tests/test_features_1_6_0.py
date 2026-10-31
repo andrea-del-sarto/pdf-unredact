@@ -97,6 +97,16 @@ class DocumentStructure160Tests(unittest.TestCase):
         self.assertIn("structure_hidden_ocr", js)
         self.assertIn("structure_separate_layers", js)
 
+    def test_frontend_javascript_syntax_is_valid(self):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        app_js = ROOT / "static" / "app.js"
+        proc = subprocess.run([node, "--check", str(app_js)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
